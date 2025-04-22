@@ -14,9 +14,12 @@ Including another URLconf
     1. Import the include() function: from django.urls import include, path
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
+# backend_config/urls.py
 from django.contrib import admin
-from django.urls import path
+from django.urls import path, include # <-- include ni import qilamiz
 
 urlpatterns = [
     path('admin/', admin.site.urls),
+    # API ilovasining URL'larini /api/v1/ prefiksi bilan qo'shamiz
+    path('api/v1/', include('api.urls')), # <-- Shu qatorni qo'shing
 ]

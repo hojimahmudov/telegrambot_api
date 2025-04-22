@@ -1,5 +1,4 @@
 # requirements.txt
-
 django>=4.0,<5.0  # Django framework
 djangorestframework>=3.14,<3.16  # Django REST Framework
 psycopg2-binary>=2.9,<2.10  # PostgreSQL adapter (agar PostgreSQL ishlatsangiz)
