@@ -1,11 +1,18 @@
 # api/views.py
 
 from rest_framework import viewsets, permissions, generics
+from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.db.models import Q  # Qidiruv uchun kerak bo'lishi mumkin
 
 from .models import User, Category, Product
-from .serializers import UserSerializer, CategorySerializer, ProductSerializer
+from .serializers import (
+    UserSerializer, CategorySerializer, ProductSerializer,
+    RegistrationSerializer, OTPVerificationSerializer
+)
+from django.utils import timezone  # Vaqt bilan ishlash uchun
+import random  # OTP generatsiyasi uchun
+from rest_framework_simplejwt.tokens import RefreshToken  # JWT token yaratish uchun
 
 
 # --- Category ViewSet ---

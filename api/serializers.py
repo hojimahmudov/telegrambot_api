@@ -4,6 +4,7 @@ from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
 from .models import User, Category, Product
+import re
 
 
 # --- User Serializer ---
@@ -66,3 +67,45 @@ class ProductSerializer(TranslatableModelSerializer):
             'is_available'  # Mahsulot mavjudligi
         ]
         # 'name' va 'description' maydonlari avtomatik tarzda so'rov tiliga mos tarjimani qaytaradi
+
+
+# --- Ro'yxatdan o'tish uchun Serializer ---
+class RegistrationSerializer(serializers.Serializer):
+    """Ro'yxatdan o'tish uchun kiruvchi ma'lumotlarni tekshiradi."""
+    telegram_id = serializers.IntegerField(required=True)
+    phone_number = serializers.CharField(required=True, max_length=20)
+    first_name = serializers.CharField(required=True, max_length=150)
+    last_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    username = serializers.CharField(required=False, allow_blank=True, max_length=150)
+
+    def validate_phone_number(self, value):
+        """Telefon raqami formatini tekshirish (soddalashtirilgan misol)."""
+        # Masalan, +998 bilan boshlanib, jami 13 ta raqamdan iborat bo'lsin
+        if not re.match(r'^\+998\d{9}$', value):
+            raise serializers.ValidationError("Telefon raqami +998XXXXXXXXX formatida bo'lishi kerak.")
+        return value
+
+    # Agar username ham unique bo'lishi kerak bo'lsa, validate qo'shish mumkin
+    def validate_username(self, value):
+        if value and User.objects.filter(username=value).exists():
+            raise serializers.ValidationError("Bu username allaqachon mavjud.")
+        return value
+
+
+# --- OTP Tasdiqlash uchun Serializer ---
+class OTPVerificationSerializer(serializers.Serializer):
+    """OTP kodni tasdiqlash uchun kiruvchi ma'lumotlarni tekshiradi."""
+    phone_number = serializers.CharField(required=True, max_length=20)
+    otp_code = serializers.CharField(required=True, min_length=4, max_length=6)  # OTP uzunligiga moslang
+
+    def validate_phone_number(self, value):
+        """Telefon raqami formatini tekshirish."""
+        if not re.match(r'^\+998\d{9}$', value):
+            raise serializers.ValidationError("Telefon raqami +998XXXXXXXXX formatida bo'lishi kerak.")
+        return value
+
+    def validate_otp_code(self, value):
+        """OTP kod faqat raqamlardan iboratligini tekshirish."""
+        if not value.isdigit():
+            raise serializers.ValidationError("OTP kod faqat raqamlardan iborat bo'lishi kerak.")
+        return value

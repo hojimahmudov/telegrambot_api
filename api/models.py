@@ -3,6 +3,7 @@ from django.db import models
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
 from parler.models import TranslatableModel, TranslatedFields
+from django.utils import timezone
 
 
 # --- Foydalanuvchi Modeli ---
@@ -28,20 +29,51 @@ class User(AbstractUser):
     # Email maydonini majburiy bo'lmagan holga keltiramiz
     email = models.EmailField(_('email address'), blank=True, null=True)
 
-    # Login uchun username o'rniga boshqa maydon ishlatmoqchi bo'lsak
-    # USERNAME_FIELD = 'phone_number' # Buni o'zgartirsak, UserManager'ni ham moslash kerak bo'ladi
-    # Hozircha 'username' qolaversin.
+    otp_code = models.CharField(
+        _("OTP Kodu"),
+        max_length=6,
+        null=True,
+        blank=True  # Kod tasdiqlangandan keyin bo'shatilishi mumkin
+    )
+    otp_created_at = models.DateTimeField(
+        _("OTP Yaratilgan Vaqti"),
+        null=True,
+        blank=True
+    )
+    # --- is_active maydonining standart qiymatini o'zgartiramiz ---
+    is_active = models.BooleanField(
+        _('active'),
+        default=False,  # <-- Foydalanuvchi OTP tasdiqlamaguncha aktiv bo'lmaydi
+        help_text=_(
+            'Designates whether this user should be treated as active. '
+            'Unselect this instead of deleting accounts.'
+        ),
+    )
 
-    # createsuperuser orqali admin yaratganda so'raladigan qo'shimcha majburiy maydonlar
     REQUIRED_FIELDS = ['telegram_id', 'phone_number', 'first_name']
 
     class Meta:
         verbose_name = _("Foydalanuvchi")
         verbose_name_plural = _("Foydalanuvchilar")
-        ordering = ['-date_joined']  # Ro'yxatdan o'tgan sanasi bo'yicha teskari tartib
+        ordering = ['-date_joined']
 
     def __str__(self):
         return self.username or self.phone_number or f"User {self.pk}"
+
+    def is_otp_valid(self, code):
+        """OTP kod to'g'riligini va muddati o'tmaganligini tekshiradi."""
+        if not self.otp_code or not self.otp_created_at:
+            return False
+        # Masalan, OTP 5 daqiqa amal qilsin
+        if self.otp_created_at < timezone.now() - timezone.timedelta(minutes=5):
+            return False
+        return self.otp_code == code
+
+    def clear_otp(self):
+        """OTP kodni tozalaydi."""
+        self.otp_code = None
+        self.otp_created_at = None
+        self.save(update_fields=['otp_code', 'otp_created_at'])
 
 
 # --- Kategoriya Modeli ---
