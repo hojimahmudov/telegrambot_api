@@ -1,7 +1,8 @@
 # api/models.py
+import datetime
 from django.db import models
 from django.conf import settings  # User modelini olish uchun qulay usul
-from django.core.validators import MinValueValidator  # Minimal qiymatni tekshirish uchun
+from django.core.validators import MinValueValidator, MaxValueValidator  # Minimal qiymatni tekshirish uchun
 from django.db.models import UniqueConstraint  # Unikalikni ta'minlash uchun
 from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
@@ -233,6 +234,96 @@ class CartItem(models.Model):
     def __str__(self):
         return f"{self.quantity} x {self.product.name} ({self.cart.user.username})"
 
+
+class Branch(models.Model):
+    """Kafe/Restoran filiallari uchun model."""
+    name = models.CharField(_("Filial nomi"), max_length=200)
+    address = models.TextField(_("Manzil"))
+    latitude = models.FloatField(_("Kenglik"))
+    longitude = models.FloatField(_("Uzunlik"))
+    phone_number = models.CharField(
+        _("Telefon raqami"),
+        max_length=20,
+        null=True,
+        blank=True
+    )
+    # Taxminiy vaqtlar uchun asos (daqiqalarda)
+    avg_preparation_minutes = models.PositiveIntegerField(
+        _("O'rtacha tayyorlash vaqti (daqiqa)"),
+        default=20,
+        help_text=_("Buyurtma tayyor bo'lishi uchun taxminiy vaqt")
+    )
+    # Yetkazib berish uchun qo'shimcha vaqt (masalan, filialdan tashqariga)
+    avg_delivery_extra_minutes = models.PositiveIntegerField(
+        _("O'rtacha yetkazish uchun qo'shimcha vaqt (daqiqa)"),
+        default=15,
+        help_text=_("Tayyor bo'lgandan keyin yetkazib berish uchun taxminiy qo'shimcha vaqt")
+    )
+    is_active = models.BooleanField(
+        _("Aktiv"),
+        default=True,
+        help_text=_("Filial hozirda ishlayaptimi va buyurtma uchun tanlanishi mumkinmi?")
+    )
+
+    class Meta:
+        verbose_name = _("Filial")
+        verbose_name_plural = _("Filiallar")
+        ordering = ['name']
+
+    def __str__(self):
+        return self.name
+
+    def is_open_now(self):
+        """Filial hozir (server vaqti bilan) ochiq yoki yopiqligini tekshiradi."""
+        now = timezone.now().time()  # Joriy vaqt (soat, daqiqa, ...)
+        today_weekday = timezone.now().weekday()  # Haftaning kuni (0=Dushanba, 6=Yakshanba)
+
+        # Agar filial uchun bugunga ish vaqti kiritilgan bo'lsa
+        working_hours_today = self.working_hours.filter(weekday=today_weekday)
+        for wh in working_hours_today:
+            if wh.from_hour <= now <= wh.to_hour:
+                return True  # Agar joriy vaqt ish vaqti oralig'ida bo'lsa
+        return False  # Agar bugun uchun ish vaqti topilmasa yoki joriy vaqt mos kelmasa
+
+
+class WorkingHours(models.Model):
+    """Filialning ish vaqtlari."""
+    WEEKDAY_CHOICES = (
+        (0, _("Dushanba")),
+        (1, _("Seshanba")),
+        (2, _("Chorshanba")),
+        (3, _("Payshanba")),
+        (4, _("Juma")),
+        (5, _("Shanba")),
+        (6, _("Yakshanba")),
+    )
+    branch = models.ForeignKey(
+        Branch,
+        on_delete=models.CASCADE,
+        related_name='working_hours',  # Branch orqali ish vaqtlariga murojaat
+        verbose_name=_("Filial")
+    )
+    weekday = models.IntegerField(
+        _("Hafta kuni"),
+        choices=WEEKDAY_CHOICES,
+        validators=[MinValueValidator(0), MaxValueValidator(6)]
+    )
+    from_hour = models.TimeField(_("Dan (vaqt)"))
+    to_hour = models.TimeField(_("Gacha (vaqt)"))
+
+    class Meta:
+        verbose_name = _("Ish vaqti")
+        verbose_name_plural = _("Ish vaqtlari")
+        ordering = ['branch', 'weekday', 'from_hour']
+        # Bitta filial uchun bir kunda bir xil boshlanish vaqti bo'lmasligi kerak
+        constraints = [
+            UniqueConstraint(fields=['branch', 'weekday', 'from_hour'], name='unique_branch_weekday_from_hour')
+        ]
+
+    def __str__(self):
+        return f"{self.branch.name}: {self.get_weekday_display()} ({self.from_hour.strftime('%H:%M')} - {self.to_hour.strftime('%H:%M')})"
+
+
 class Order(models.Model):
     """Mijozlar tomonidan qilingan buyurtmalar."""
     STATUS_CHOICES = (
@@ -248,13 +339,16 @@ class Order(models.Model):
     )
     PAYMENT_CHOICES = (
         ('cash', _('Naqd pul')),
-        ('card', _('Karta orqali')), # Yoki 'payme', 'click'
+        ('card', _('Karta orqali')),  # Yoki 'payme', 'click'
     )
 
-    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='orders', verbose_name=_("Foydalanuvchi")) # Agar user o'chsa, buyurtma qolsin
-    status = models.CharField(_("Holati"), max_length=20, choices=STATUS_CHOICES, default='new', db_index=True) # Holat bo'yicha indekslash
+    user = models.ForeignKey(settings.AUTH_USER_MODEL, on_delete=models.SET_NULL, null=True, related_name='orders',
+                             verbose_name=_("Foydalanuvchi"))  # Agar user o'chsa, buyurtma qolsin
+    status = models.CharField(_("Holati"), max_length=20, choices=STATUS_CHOICES, default='new',
+                              db_index=True)  # Holat bo'yicha indekslash
     total_price = models.DecimalField(_("Umumiy summa"), max_digits=12, decimal_places=2)
-    delivery_type = models.CharField(_("Yetkazib berish turi"), max_length=10, choices=DELIVERY_CHOICES, default='delivery')
+    delivery_type = models.CharField(_("Yetkazib berish turi"), max_length=10, choices=DELIVERY_CHOICES,
+                                     default='delivery')
     # Yetkazib berish uchun ma'lumotlar (agar delivery_type == 'delivery')
     address = models.TextField(_("Manzil"), null=True, blank=True)
     latitude = models.FloatField(_("Kenglik"), null=True, blank=True)
@@ -264,13 +358,31 @@ class Order(models.Model):
     # Qo'shimcha izohlar
     notes = models.TextField(_("Izohlar"), null=True, blank=True)
 
+    pickup_branch = models.ForeignKey(
+        Branch,
+        on_delete=models.SET_NULL,  # Filial o'chsa ham buyurtma qolsin
+        null=True,
+        blank=True,  # Faqat pickup uchun kerak
+        related_name='pickup_orders',
+        verbose_name=_("Olib ketish filiali")
+    )
+    # Taxminiy vaqtlar (hisoblab to'ldiriladi)
+    estimated_ready_at = models.DateTimeField(
+        _("Taxminiy tayyor bo'lish vaqti (pickup)"),
+        null=True, blank=True
+    )
+    estimated_delivery_at = models.DateTimeField(
+        _("Taxminiy yetkazib berish vaqti (delivery)"),
+        null=True, blank=True
+    )
+
     created_at = models.DateTimeField(_("Yaratilgan vaqti"), auto_now_add=True)
     updated_at = models.DateTimeField(_("Yangilangan vaqti"), auto_now=True)
 
     class Meta:
         verbose_name = _("Buyurtma")
         verbose_name_plural = _("Buyurtmalar")
-        ordering = ['-created_at'] # Oxirgi buyurtmalar birinchi
+        ordering = ['-created_at']  # Oxirgi buyurtmalar birinchi
 
     def __str__(self):
         # Foydalanuvchi None bo'lishi mumkinligini hisobga olamiz (SET_NULL tufayli)
@@ -281,23 +393,25 @@ class Order(models.Model):
 class OrderItem(models.Model):
     """Buyurtmadagi alohida mahsulot qatori."""
     order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name='items', verbose_name=_("Buyurtma"))
-    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True, verbose_name=_("Mahsulot")) # Mahsulot o'chsa ham buyurtmada qolsin
+    product = models.ForeignKey(Product, on_delete=models.SET_NULL, null=True,
+                                verbose_name=_("Mahsulot"))  # Mahsulot o'chsa ham buyurtmada qolsin
     quantity = models.PositiveIntegerField(_("Soni"), default=1, validators=[MinValueValidator(1)])
     # Muhim: Mahsulot narxini buyurtma paytida saqlab qolamiz!
     price_per_unit = models.DecimalField(_("Birlik narxi (buyurtma paytida)"), max_digits=10, decimal_places=2)
-    total_price = models.DecimalField(_("Umumiy narx"), max_digits=12, decimal_places=2) # quantity * price_per_unit
+    total_price = models.DecimalField(_("Umumiy narx"), max_digits=12, decimal_places=2)  # quantity * price_per_unit
 
     class Meta:
         verbose_name = _("Buyurtma mahsuloti")
         verbose_name_plural = _("Buyurtma mahsulotlari")
 
-    def save(self, *args, **kwargs):
-        # total_price ni avtomatik hisoblaymiz (agar qo'lda kiritilmagan bo'lsa)
-        # Yoki View'da hisoblab yozish ham mumkin. Bu yerda hisoblash qulayroq.
-        self.total_price = self.price_per_unit * self.quantity
-        super().save(*args, **kwargs)
+    # def save(self, *args, **kwargs):
+    #     # total_price ni avtomatik hisoblaymiz (agar qo'lda kiritilmagan bo'lsa)
+    #     # Yoki View'da hisoblab yozish ham mumkin. Bu yerda hisoblash qulayroq.
+    #     self.total_price = self.price_per_unit * self.quantity
+    #     super().save(*args, **kwargs)
 
     def __str__(self):
         # Mahsulot None bo'lishi mumkinligini hisobga olamiz (SET_NULL tufayli)
-        product_name = self.product.safe_translation_getter('name', any_language=True) if self.product else _("O'chirilgan mahsulot")
+        product_name = self.product.safe_translation_getter('name', any_language=True) if self.product else _(
+            "O'chirilgan mahsulot")
         return f"{self.quantity} x {product_name} (Buyurtma #{self.order.pk})"

@@ -338,19 +338,19 @@ class CheckoutView(APIView):
     """
     Savatdagi mahsulotlar asosida yangi buyurtma yaratish uchun endpoint.
     """
-    permission_classes = [permissions.IsAuthenticated] # Faqat login qilganlar buyurtma bera oladi
+    permission_classes = [permissions.IsAuthenticated]  # Faqat login qilganlar buyurtma bera oladi
 
-    @transaction.atomic # <-- Atomiklikni ta'minlash uchun (yoki hammasi, yoki hech biri)
+    @transaction.atomic  # <-- Atomiklikni ta'minlash uchun (yoki hammasi, yoki hech biri)
     def post(self, request):
         user = request.user
         # Foydalanuvchining savatini olamiz (agar yo'q bo'lsa xatolik bermaydi, shuning uchun tekshiramiz)
         try:
             cart = user.cart
             cart_items = cart.items.all()
-            if not cart_items.exists(): # Savat bo'shligini tekshiramiz
+            if not cart_items.exists():  # Savat bo'shligini tekshiramiz
                 return Response({"error": "Buyurtma berish uchun savat bo'sh."}, status=status.HTTP_400_BAD_REQUEST)
         except Cart.DoesNotExist:
-             return Response({"error": "Savat topilmadi."}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({"error": "Savat topilmadi."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Kiruvchi ma'lumotlarni validatsiya qilamiz
         checkout_serializer = CheckoutSerializer(data=request.data)
@@ -363,8 +363,8 @@ class CheckoutView(APIView):
         try:
             order = Order.objects.create(
                 user=user,
-                status='new', # Boshlang'ich status
-                total_price=cart.total_price, # Savatning umumiy summasini olamiz
+                status='new',  # Boshlang'ich status
+                total_price=cart.total_price,  # Savatning umumiy summasini olamiz
                 delivery_type=validated_data.get('delivery_type'),
                 address=validated_data.get('address'),
                 latitude=validated_data.get('latitude'),
@@ -374,8 +374,8 @@ class CheckoutView(APIView):
             )
         except Exception as e:
             # Order yaratishda xatolik bo'lsa
-            return Response({"error": f"Buyurtma yaratishda xatolik: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            return Response({"error": f"Buyurtma yaratishda xatolik: {e}"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Savatdagi har bir mahsulot uchun OrderItem yaratamiz
         order_items_to_create = []
@@ -385,17 +385,18 @@ class CheckoutView(APIView):
                 # Agar mahsulot mavjud bo'lmasa, tranzaksiyani bekor qilib xatolik qaytarish
                 # transaction.set_rollback(True) # Bu atomicity'ni ta'minlaydi
                 return Response(
-                    {"error": f"Mahsulot '{cart_item.product.name if cart_item.product else 'Nomalum'}' buyurtma paytida mavjud emas."},
+                    {
+                        "error": f"Mahsulot '{cart_item.product.name if cart_item.product else 'Nomalum'}' buyurtma paytida mavjud emas."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-
+            item_total_price = cart_item.product.price * cart_item.quantity
             order_items_to_create.append(
                 OrderItem(
                     order=order,
                     product=cart_item.product,
                     quantity=cart_item.quantity,
-                    price_per_unit=cart_item.product.price # Buyurtma paytidagi narxni saqlaymiz
-                    # total_price OrderItem.save() metodida hisoblanadi
+                    price_per_unit=cart_item.product.price,  # Buyurtma paytidagi narxni saqlaymiz
+                    total_price=item_total_price
                 )
             )
 
@@ -404,11 +405,11 @@ class CheckoutView(APIView):
             OrderItem.objects.bulk_create(order_items_to_create)
         except Exception as e:
             # OrderItem yaratishda xatolik bo'lsa (bu yerga yetib kelishi qiyin, lekin ehtiyot shart)
-             return Response({"error": f"Buyurtma mahsulotlarini yaratishda xatolik: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
-
+            return Response({"error": f"Buyurtma mahsulotlarini yaratishda xatolik: {e}"},
+                            status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
         # Savatni tozalaymiz
-        cart_items.delete() # Yoki cart.delete() agar savat boshqa kerak bo'lmasa
+        cart_items.delete()  # Yoki cart.delete() agar savat boshqa kerak bo'lmasa
 
         # Yaratilgan buyurtmani OrderSerializer orqali qaytaramiz
         order_serializer = OrderSerializer(order, context={'request': request})
