@@ -1,7 +1,13 @@
 # api/urls.py
 from django.urls import path, include
 from rest_framework.routers import DefaultRouter
-from .views import CategoryViewSet, ProductViewSet, UserProfileView
+# View'larni import qilamiz
+from .views import (
+    CategoryViewSet, ProductViewSet, UserProfileView,
+    RegistrationView, OTPVerificationView, CartView, CheckoutView  # <-- Yangi View'lar
+)
+# simplejwt view'larini import qilamiz (token refresh uchun)
+from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
 
 # Router obyektini yaratamiz
 router = DefaultRouter()
@@ -20,5 +26,17 @@ urlpatterns = [
     # Alohida View uchun URL manzil
     path('users/profile/', UserProfileView.as_view(), name='user-profile'),
 
-    # Kelajakda boshqa URL'lar shu yerga qo'shiladi (masalan, buyurtmalar uchun)
+    # --- Autentifikatsiya Endpoint'lari ---
+    path('auth/register/', RegistrationView.as_view(), name='auth-register'),
+    path('auth/verify/', OTPVerificationView.as_view(), name='auth-verify'),
+
+    # --- JWT Token Endpoint'lari ---
+    # Agar username/password login kerak bo'lsa (hozir bizda OTP orqali)
+    # path('auth/token/', TokenObtainPairView.as_view(), name='token_obtain_pair'),
+    path('auth/token/refresh/', TokenRefreshView.as_view(), name='token-refresh'),  # Access tokenni yangilash uchun
+
+    # --- Savat Endpoint'i ---
+    path('cart/', CartView.as_view(), name='user-cart'),
+    # --- Yangi Checkout Endpoint'i ---
+    path('orders/checkout/', CheckoutView.as_view(), name='order-checkout'),
 ]

@@ -3,7 +3,7 @@
 from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
-from .models import User, Category, Product
+from .models import User, Category, Product, CartItem, Cart, OrderItem, Order
 import re
 
 
@@ -109,3 +109,138 @@ class OTPVerificationSerializer(serializers.Serializer):
         if not value.isdigit():
             raise serializers.ValidationError("OTP kod faqat raqamlardan iborat bo'lishi kerak.")
         return value
+
+
+class CartItemSerializer(serializers.ModelSerializer):
+    """Savatdagi alohida mahsulot qatorini serializatsiya qiladi."""
+    # Mahsulot ma'lumotlarini ko'rsatish uchun ProductSerializer'dan foydalanamiz
+    # Bu read_only, chunki savatni ko'rsatganda mahsulotni o'zgartirmaymiz
+    # ProductSerializer avvalroq aniqlangan bo'lishi kerak
+    product = ProductSerializer(read_only=True)
+
+    # Savatga mahsulot qo'shish/o'zgartirish uchun faqat ID ishlatiladi
+    product_id = serializers.PrimaryKeyRelatedField(
+        queryset=Product.objects.all(),
+        source='product',
+        write_only=True  # Faqat yozish uchun
+    )
+
+    # Mahsulot soni (o'qish va yozish uchun)
+    # quantity = serializers.IntegerField(min_value=1) # Modelda validator borligi uchun bu shart emas
+
+    # Shu qatordagi umumiy narxni hisoblash uchun (faqat o'qish uchun)
+    # Modelda 'get_item_total' property'si borligi uchun shuni ishlatamiz
+    item_total = serializers.DecimalField(source='get_item_total', max_digits=12, decimal_places=2, read_only=True)
+
+    class Meta:
+        model = CartItem
+        fields = ['id', 'product', 'product_id', 'quantity', 'item_total', 'added_at']
+        read_only_fields = ['id', 'added_at']  # Bu maydonlar avtomatik to'ldiriladi
+
+
+class CartSerializer(serializers.ModelSerializer):
+    """To'liq savat ma'lumotlarini (mahsulotlari bilan) serializatsiya qiladi."""
+    # Savatdagi mahsulotlar ro'yxati (ichma-ich joylashgan)
+    # Yuqoridagi CartItemSerializer'dan foydalanamiz
+    items = CartItemSerializer(many=True, read_only=True)  # Ko'plab item bo'lishi mumkin
+
+    # Savatning umumiy summasi (faqat o'qish uchun)
+    # Modelda 'total_price' property'si borligi uchun shuni ishlatamiz
+    total_price = serializers.DecimalField(max_digits=12, decimal_places=2, read_only=True)
+
+    # Foydalanuvchi ID si (ixtiyoriy, agar kerak bo'lsa)
+    user_id = serializers.PrimaryKeyRelatedField(read_only=True, source='user.id')
+
+    class Meta:
+        model = Cart
+        fields = ['id', 'user_id', 'items', 'total_price', 'updated_at']
+        read_only_fields = ['id', 'updated_at']
+
+
+class OrderItemSerializer(serializers.ModelSerializer):
+    """Buyurtma tarkibidagi mahsulotni serializatsiya qiladi."""
+    # Mahsulot ma'lumotlarini ProductSerializer orqali ko'rsatamiz
+    # (Faqat o'qish uchun, chunki buyurtma yaratilgandan keyin o'zgarmaydi)
+    # ProductSerializer avvalroq aniqlangan bo'lishi kerak
+    product = ProductSerializer(read_only=True)
+
+    class Meta:
+        model = OrderItem
+        fields = [
+            'id',
+            'product',
+            'quantity',
+            'price_per_unit', # Buyurtma paytidagi narx
+            'total_price'     # Shu qatorning umumiy summasi (quantity * price_per_unit)
+        ]
+
+
+class OrderSerializer(serializers.ModelSerializer):
+    """Buyurtma ma'lumotlarini (mahsulotlari bilan) serializatsiya qiladi."""
+    # Buyurtma tarkibidagi mahsulotlar ro'yxati
+    items = OrderItemSerializer(many=True, read_only=True)
+    # Foydalanuvchi ma'lumotlari (ixtiyoriy, ID sini chiqaramiz)
+    user = UserSerializer(read_only=True) # Yoki user_id = serializers.PrimaryKeyRelatedField(read_only=True)
+
+    # Status, delivery_type, payment_type uchun tushunarli nomlarni chiqarish (ixtiyoriy)
+    # status_display = serializers.CharField(source='get_status_display', read_only=True)
+    # delivery_type_display = serializers.CharField(source='get_delivery_type_display', read_only=True)
+    # payment_type_display = serializers.CharField(source='get_payment_type_display', read_only=True)
+
+    class Meta:
+        model = Order
+        fields = [
+            'id',
+            'user',
+            'status', # Hozircha kodini chiqaramiz ('new', 'preparing', ...)
+            # 'status_display', # Agar yuqoridagi kabi qo'shilsa
+            'total_price',
+            'delivery_type',
+            # 'delivery_type_display',
+            'address',
+            'latitude',
+            'longitude',
+            'payment_type',
+            # 'payment_type_display',
+            'notes',
+            'items', # Buyurtma tarkibi
+            'created_at',
+            'updated_at',
+        ]
+
+
+class CheckoutSerializer(serializers.Serializer):
+    """Checkout uchun kiruvchi ma'lumotlarni tekshiradi."""
+    delivery_type = serializers.ChoiceField(
+        choices=Order.DELIVERY_CHOICES, # Modelldagi tanlovlardan olish
+        required=True
+    )
+    address = serializers.CharField(required=False, allow_blank=True)
+    latitude = serializers.FloatField(required=False, allow_null=True)
+    longitude = serializers.FloatField(required=False, allow_null=True)
+    payment_type = serializers.ChoiceField(
+        choices=Order.PAYMENT_CHOICES,
+        required=True
+    )
+    notes = serializers.CharField(required=False, allow_blank=True, style={'base_template': 'textarea.html'}) # Katta matn maydoni (ixtiyoriy)
+
+    def validate(self, data):
+        """
+        Umumiy validatsiya: Agar yetkazib berish tanlansa, manzil yoki lokatsiya bo'lishi kerak.
+        """
+        delivery_type = data.get('delivery_type')
+        address = data.get('address')
+        latitude = data.get('latitude')
+        longitude = data.get('longitude')
+
+        if delivery_type == 'delivery':
+            if not address and not (latitude is not None and longitude is not None):
+                raise serializers.ValidationError(
+                    "Yetkazib berish uchun 'address' yoki 'latitude' va 'longitude' maydonlaridan biri to'ldirilishi shart."
+                )
+            # Agar lokatsiya berilsa, ikkalasi ham bo'lishi kerakligini tekshirish mumkin
+            if (latitude is not None and longitude is None) or (latitude is None and longitude is not None):
+                 raise serializers.ValidationError("'latitude' va 'longitude' birga berilishi kerak.")
+
+        # Boshqa validatsiyalarni shu yerga qo'shish mumkin
+        return data
