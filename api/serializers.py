@@ -1,5 +1,7 @@
 # api/serializers.py
 import re
+from importlib.resources import _
+
 from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
@@ -254,36 +256,67 @@ class OrderSerializer(serializers.ModelSerializer):
 class CheckoutSerializer(serializers.Serializer):
     """Checkout uchun kiruvchi ma'lumotlarni tekshiradi."""
     delivery_type = serializers.ChoiceField(
-        choices=Order.DELIVERY_CHOICES,  # Modelldagi tanlovlardan olish
+        choices=Order.DELIVERY_CHOICES,
         required=True
     )
-    address = serializers.CharField(required=False, allow_blank=True)
+    # --- pickup_branch_id maydonini qo'shamiz ---
+    # Bu faqat yozish uchun, OrderSerializerda alohida ko'rsatiladi
+    pickup_branch_id = serializers.PrimaryKeyRelatedField(
+        queryset=Branch.objects.filter(is_active=True),  # Faqat aktiv filiallar
+        source='pickup_branch',  # Order modelidagi maydon nomi
+        required=False,  # Avvaliga required=False, validatsiyada tekshiramiz
+        allow_null=True,
+        write_only=True,
+        label=_("Olib ketish filiali IDsi")
+    )
+    # ------------------------------------------
+    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # allow_null qo'shildi
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)
     payment_type = serializers.ChoiceField(
         choices=Order.PAYMENT_CHOICES,
         required=True
     )
-    notes = serializers.CharField(required=False, allow_blank=True,
-                                  style={'base_template': 'textarea.html'})  # Katta matn maydoni (ixtiyoriy)
+    notes = serializers.CharField(required=False, allow_blank=True, allow_null=True,
+                                  style={'base_template': 'textarea.html'})
 
     def validate(self, data):
         """
-        Umumiy validatsiya: Agar yetkazib berish tanlansa, manzil yoki lokatsiya bo'lishi kerak.
+        Umumiy validatsiya: Yetkazib berish turi va filial holatini tekshiradi.
         """
         delivery_type = data.get('delivery_type')
+        pickup_branch = data.get('pickup_branch')  # source='pickup_branch' tufayli bu yerda Branch obyekti bo'ladi
         address = data.get('address')
         latitude = data.get('latitude')
         longitude = data.get('longitude')
 
         if delivery_type == 'delivery':
+            if pickup_branch:
+                raise serializers.ValidationError(
+                    {"pickup_branch_id": _("Yetkazib berish tanlanganda filial ko'rsatilmasligi kerak.")}
+                )
             if not address and not (latitude is not None and longitude is not None):
                 raise serializers.ValidationError(
-                    "Yetkazib berish uchun 'address' yoki 'latitude' va 'longitude' maydonlaridan biri to'ldirilishi shart."
+                    _("Yetkazib berish uchun 'address' yoki 'latitude' va 'longitude' maydonlaridan biri to'ldirilishi shart.")
                 )
-            # Agar lokatsiya berilsa, ikkalasi ham bo'lishi kerakligini tekshirish mumkin
             if (latitude is not None and longitude is None) or (latitude is None and longitude is not None):
-                raise serializers.ValidationError("'latitude' va 'longitude' birga berilishi kerak.")
+                raise serializers.ValidationError(_("'latitude' va 'longitude' birga berilishi kerak."))
 
-        # Boshqa validatsiyalarni shu yerga qo'shish mumkin
+        elif delivery_type == 'pickup':
+            if not pickup_branch:
+                raise serializers.ValidationError(
+                    {"pickup_branch_id": _("Olib ketish uchun filial tanlanishi shart.")}
+                )
+            # Manzil/lokatsiya kerak emasligini tekshirish (ixtiyoriy)
+            if address or latitude is not None or longitude is not None:
+                raise serializers.ValidationError(
+                    _("Olib ketish tanlanganda manzil yoki lokatsiya kiritilmaydi.")
+                )
+            # --- Filial ochiqligini tekshirish ---
+            if not pickup_branch.is_open_now():
+                raise serializers.ValidationError(
+                    {"pickup_branch_id": _("Tanlangan filial hozirda yopiq.")}
+                )
+            # ----------------------------------
+
         return data
