@@ -225,6 +225,7 @@ class OrderSerializer(serializers.ModelSerializer):
     items = OrderItemSerializer(many=True, read_only=True)
     # Foydalanuvchi ma'lumotlari (ixtiyoriy, ID sini chiqaramiz)
     user = UserSerializer(read_only=True)  # Yoki user_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    pickup_branch = BranchSerializer(read_only=True)
 
     # Status, delivery_type, payment_type uchun tushunarli nomlarni chiqarish (ixtiyoriy)
     # status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -240,14 +241,15 @@ class OrderSerializer(serializers.ModelSerializer):
             # 'status_display', # Agar yuqoridagi kabi qo'shilsa
             'total_price',
             'delivery_type',
-            # 'delivery_type_display',
             'address',
             'latitude',
             'longitude',
             'payment_type',
-            # 'payment_type_display',
             'notes',
-            'items',  # Buyurtma tarkibi
+            'pickup_branch',
+            'estimated_ready_at',
+            'estimated_delivery_at',
+            'items',
             'created_at',
             'updated_at',
         ]
@@ -259,18 +261,17 @@ class CheckoutSerializer(serializers.Serializer):
         choices=Order.DELIVERY_CHOICES,
         required=True
     )
-    # --- pickup_branch_id maydonini qo'shamiz ---
-    # Bu faqat yozish uchun, OrderSerializerda alohida ko'rsatiladi
     pickup_branch_id = serializers.PrimaryKeyRelatedField(
-        queryset=Branch.objects.filter(is_active=True),  # Faqat aktiv filiallar
-        source='pickup_branch',  # Order modelidagi maydon nomi
-        required=False,  # Avvaliga required=False, validatsiyada tekshiramiz
+        queryset=Branch.objects.filter(is_active=True),
+        source='pickup_branch',
+        required=False,
         allow_null=True,
         write_only=True,
         label=_("Olib ketish filiali IDsi")
     )
-    # ------------------------------------------
-    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # allow_null qo'shildi
+    # Manzil endi majburiy emas, ixtiyoriy axborot sifatida qoladi
+    address = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    # Latitude va Longitude 'delivery' uchun majburiy bo'ladi
     latitude = serializers.FloatField(required=False, allow_null=True)
     longitude = serializers.FloatField(required=False, allow_null=True)
     payment_type = serializers.ChoiceField(
@@ -282,41 +283,43 @@ class CheckoutSerializer(serializers.Serializer):
 
     def validate(self, data):
         """
-        Umumiy validatsiya: Yetkazib berish turi va filial holatini tekshiradi.
+        Umumiy validatsiya: Yetkazib berish turi, lokatsiya va filial holatini tekshiradi.
         """
         delivery_type = data.get('delivery_type')
-        pickup_branch = data.get('pickup_branch')  # source='pickup_branch' tufayli bu yerda Branch obyekti bo'ladi
-        address = data.get('address')
+        pickup_branch = data.get('pickup_branch')
         latitude = data.get('latitude')
         longitude = data.get('longitude')
 
         if delivery_type == 'delivery':
+            # --- YETKAZIB BERISH UCHUN YANGI TEKSHIRUV ---
+            if latitude is None or longitude is None:
+                # Agar lat yoki lon kelmasa, xatolik beramiz
+                raise serializers.ValidationError({
+                    "latitude": [_("Yetkazib berish uchun majburiy maydon.")],
+                    "longitude": [_("Yetkazib berish uchun majburiy maydon.")]
+                })
+            # --------------------------------------------
             if pickup_branch:
                 raise serializers.ValidationError(
                     {"pickup_branch_id": _("Yetkazib berish tanlanganda filial ko'rsatilmasligi kerak.")}
                 )
-            if not address and not (latitude is not None and longitude is not None):
-                raise serializers.ValidationError(
-                    _("Yetkazib berish uchun 'address' yoki 'latitude' va 'longitude' maydonlaridan biri to'ldirilishi shart.")
-                )
-            if (latitude is not None and longitude is None) or (latitude is None and longitude is not None):
-                raise serializers.ValidationError(_("'latitude' va 'longitude' birga berilishi kerak."))
 
         elif delivery_type == 'pickup':
             if not pickup_branch:
                 raise serializers.ValidationError(
                     {"pickup_branch_id": _("Olib ketish uchun filial tanlanishi shart.")}
                 )
-            # Manzil/lokatsiya kerak emasligini tekshirish (ixtiyoriy)
-            if address or latitude is not None or longitude is not None:
-                raise serializers.ValidationError(
-                    _("Olib ketish tanlanganda manzil yoki lokatsiya kiritilmaydi.")
+            # Pickup uchun lokatsiya kiritilmasligini tekshirish
+            if latitude is not None or longitude is not None:
+                raise serializers.ValidationError({
+                    "latitude": [_("Olib ketish tanlanganda lokatsiya kiritilmaydi.")],
+                    "longitude": [_("Olib ketish tanlanganda lokatsiya kiritilmaydi.")]
+                }
                 )
-            # --- Filial ochiqligini tekshirish ---
+            # Filial ochiqligini tekshirish
             if not pickup_branch.is_open_now():
                 raise serializers.ValidationError(
                     {"pickup_branch_id": _("Tanlangan filial hozirda yopiq.")}
                 )
-            # ----------------------------------
 
         return data

@@ -9,6 +9,8 @@ from django.utils import timezone
 import random
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.db import transaction  # <-- Ma'lumotlar bazasi tranzaksiyalari uchun
+from django.utils import timezone
+from datetime import timedelta
 from decimal import Decimal  # <-- Narxlar bilan ishlash uchun
 
 # Modellarni import qilamiz
@@ -335,55 +337,56 @@ class CartView(APIView):
 
 
 class CheckoutView(APIView):
-    """
-    Savatdagi mahsulotlar asosida yangi buyurtma yaratish uchun endpoint.
-    """
-    permission_classes = [permissions.IsAuthenticated]  # Faqat login qilganlar buyurtma bera oladi
+    permission_classes = [permissions.IsAuthenticated]
 
-    @transaction.atomic  # <-- Atomiklikni ta'minlash uchun (yoki hammasi, yoki hech biri)
+    @transaction.atomic
     def post(self, request):
         user = request.user
-        # Foydalanuvchining savatini olamiz (agar yo'q bo'lsa xatolik bermaydi, shuning uchun tekshiramiz)
         try:
             cart = user.cart
             cart_items = cart.items.all()
-            if not cart_items.exists():  # Savat bo'shligini tekshiramiz
+            if not cart_items.exists():
                 return Response({"error": "Buyurtma berish uchun savat bo'sh."}, status=status.HTTP_400_BAD_REQUEST)
         except Cart.DoesNotExist:
             return Response({"error": "Savat topilmadi."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # Kiruvchi ma'lumotlarni validatsiya qilamiz
-        checkout_serializer = CheckoutSerializer(data=request.data)
+        # --- Kiruvchi ma'lumotlarni validatsiya qilamiz (pickup_branch ham tekshiriladi) ---
+        checkout_serializer = CheckoutSerializer(data=request.data,
+                                                 context={'request': request})  # Context qo'shish mumkin
         if not checkout_serializer.is_valid():
             return Response(checkout_serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         validated_data = checkout_serializer.validated_data
+        delivery_type = validated_data.get('delivery_type')
+        pickup_branch = validated_data.get('pickup_branch')  # Bu yerda Branch obyekti keladi
 
-        # Yangi Order yaratamiz
+        # --- Order uchun ma'lumotlarni tayyorlaymiz ---
+        order_data = {
+            'user': user,
+            'status': 'new',
+            'total_price': cart.total_price,
+            'delivery_type': delivery_type,
+            'address': validated_data.get('address'),
+            'latitude': validated_data.get('latitude'),
+            'longitude': validated_data.get('longitude'),
+            'payment_type': validated_data.get('payment_type'),
+            'notes': validated_data.get('notes')
+        }
+        # Agar pickup bo'lsa, filialni qo'shamiz
+        if delivery_type == 'pickup' and pickup_branch:
+            order_data['pickup_branch'] = pickup_branch
+
+        # --- Order yaratamiz ---
         try:
-            order = Order.objects.create(
-                user=user,
-                status='new',  # Boshlang'ich status
-                total_price=cart.total_price,  # Savatning umumiy summasini olamiz
-                delivery_type=validated_data.get('delivery_type'),
-                address=validated_data.get('address'),
-                latitude=validated_data.get('latitude'),
-                longitude=validated_data.get('longitude'),
-                payment_type=validated_data.get('payment_type'),
-                notes=validated_data.get('notes')
-            )
+            order = Order.objects.create(**order_data)
         except Exception as e:
-            # Order yaratishda xatolik bo'lsa
             return Response({"error": f"Buyurtma yaratishda xatolik: {e}"},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Savatdagi har bir mahsulot uchun OrderItem yaratamiz
+        # --- OrderItem'larni yaratamiz ---
         order_items_to_create = []
         for cart_item in cart_items:
-            # Mahsulot hali ham mavjudligini tekshirish (ixtiyoriy, lekin yaxshi amaliyot)
             if not cart_item.product or not cart_item.product.is_available:
-                # Agar mahsulot mavjud bo'lmasa, tranzaksiyani bekor qilib xatolik qaytarish
-                # transaction.set_rollback(True) # Bu atomicity'ni ta'minlaydi
                 return Response(
                     {
                         "error": f"Mahsulot '{cart_item.product.name if cart_item.product else 'Nomalum'}' buyurtma paytida mavjud emas."},
@@ -395,23 +398,46 @@ class CheckoutView(APIView):
                     order=order,
                     product=cart_item.product,
                     quantity=cart_item.quantity,
-                    price_per_unit=cart_item.product.price,  # Buyurtma paytidagi narxni saqlaymiz
+                    price_per_unit=cart_item.product.price,
                     total_price=item_total_price
                 )
             )
-
-        # OrderItem'larni bir martada bazaga yozamiz (samaradorlik uchun)
         try:
             OrderItem.objects.bulk_create(order_items_to_create)
         except Exception as e:
-            # OrderItem yaratishda xatolik bo'lsa (bu yerga yetib kelishi qiyin, lekin ehtiyot shart)
             return Response({"error": f"Buyurtma mahsulotlarini yaratishda xatolik: {e}"},
                             status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
-        # Savatni tozalaymiz
-        cart_items.delete()  # Yoki cart.delete() agar savat boshqa kerak bo'lmasa
+        # --- Taxminiy vaqtni hisoblaymiz va saqlaymiz ---
+        relevant_branch = None
+        if delivery_type == 'pickup':
+            relevant_branch = pickup_branch
+        # TODO: Agar delivery bo'lsa, qaysi filialdan yetkazilishini aniqlash logikasi kerak
+        # Hozircha faqat pickup uchun hisoblaymiz yoki standart filial belgilash mumkin
+        # Masalan, ID si 1 bo'lgan filialni standart deb olaylik (agar pickup_branch bo'lmasa)
+        # elif Branch.objects.filter(is_active=True).exists():
+        #      relevant_branch = Branch.objects.filter(is_active=True).first()
 
-        # Yaratilgan buyurtmani OrderSerializer orqali qaytaramiz
+        if relevant_branch:
+            try:
+                now = timezone.now()
+                prep_time = timedelta(minutes=relevant_branch.avg_preparation_minutes)
+                order.estimated_ready_at = now + prep_time
+
+                if delivery_type == 'delivery':
+                    delivery_time = timedelta(minutes=relevant_branch.avg_delivery_extra_minutes)
+                    order.estimated_delivery_at = order.estimated_ready_at + delivery_time
+
+                order.save(update_fields=['estimated_ready_at', 'estimated_delivery_at'])
+            except Exception as e:
+                # Taxminiy vaqtni hisoblashda xato bo'lsa ham, buyurtma yaratildi deb hisoblaymiz
+                # Lekin logga yozib qo'yish kerak
+                print(f"Error calculating estimated time for order {order.id}: {e}")
+
+        # --- Savatni tozalaymiz ---
+        cart_items.delete()
+
+        # --- Yaratilgan buyurtmani qaytaramiz ---
         order_serializer = OrderSerializer(order, context={'request': request})
         return Response(order_serializer.data, status=status.HTTP_201_CREATED)
 
@@ -421,6 +447,6 @@ class BranchListView(generics.ListAPIView):
     Barcha aktiv filiallar ro'yxatini qaytaradi.
     Har bir filial uchun ish vaqtlari va hozirgi ochiq/yopiqlik statusi ham qo'shiladi.
     """
-    queryset = Branch.objects.filter(is_active=True).prefetch_related('working_hours') # Faqat aktiv filiallar
+    queryset = Branch.objects.filter(is_active=True).prefetch_related('working_hours')  # Faqat aktiv filiallar
     serializer_class = BranchSerializer
-    permission_classes = [permissions.AllowAny] # Filiallar ro'yxati hammaga ochiq
+    permission_classes = [permissions.AllowAny]  # Filiallar ro'yxati hammaga ochiq
