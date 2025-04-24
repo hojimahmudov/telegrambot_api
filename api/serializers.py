@@ -1,10 +1,12 @@
 # api/serializers.py
-
+import re
 from rest_framework import serializers
 from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
-from .models import User, Category, Product, CartItem, Cart, OrderItem, Order
-import re
+from .models import (
+    User, Category, Product, Cart, CartItem, Order, OrderItem,
+    Branch, WorkingHours
+)
 
 
 # --- User Serializer ---
@@ -170,8 +172,48 @@ class OrderItemSerializer(serializers.ModelSerializer):
             'id',
             'product',
             'quantity',
-            'price_per_unit', # Buyurtma paytidagi narx
-            'total_price'     # Shu qatorning umumiy summasi (quantity * price_per_unit)
+            'price_per_unit',  # Buyurtma paytidagi narx
+            'total_price'  # Shu qatorning umumiy summasi (quantity * price_per_unit)
+        ]
+
+
+class WorkingHoursSerializer(serializers.ModelSerializer):
+    """Ish vaqtini serializatsiya qiladi."""
+    # Haftaning kunini nomi bilan chiqarish uchun
+    weekday_display = serializers.CharField(source='get_weekday_display', read_only=True)
+
+    # Vaqtni HH:MM formatida chiqarish
+    from_hour = serializers.TimeField(format='%H:%M')
+    to_hour = serializers.TimeField(format='%H:%M')
+
+    class Meta:
+        model = WorkingHours
+        fields = ['id', 'weekday', 'weekday_display', 'from_hour', 'to_hour']
+
+
+class BranchSerializer(serializers.ModelSerializer):
+    """Filial ma'lumotlarini (ish vaqtlari va ochiqlik statusi bilan) serializatsiya qiladi."""
+    # Filialning ish vaqtlarini nested qilib chiqaramiz
+    working_hours = WorkingHoursSerializer(many=True, read_only=True)
+
+    # Filial hozir ochiq yoki yo'qligini ko'rsatuvchi maydon
+    # Modelda yaratilgan 'is_open_now' metodidan qiymat oladi
+    is_open = serializers.BooleanField(source='is_open_now', read_only=True)
+
+    class Meta:
+        model = Branch
+        fields = [
+            'id',
+            'name',
+            'address',
+            'latitude',
+            'longitude',
+            'phone_number',
+            'avg_preparation_minutes',  # Taxminiy vaqt uchun
+            'avg_delivery_extra_minutes',  # Taxminiy vaqt uchun
+            'is_active',  # Bu maydonni qoldiramiz, lekin view faqat aktivlarni oladi
+            'is_open',  # Hozir ochiq yoki yo'qligi
+            'working_hours'  # Ish vaqtlari ro'yxati
         ]
 
 
@@ -180,7 +222,7 @@ class OrderSerializer(serializers.ModelSerializer):
     # Buyurtma tarkibidagi mahsulotlar ro'yxati
     items = OrderItemSerializer(many=True, read_only=True)
     # Foydalanuvchi ma'lumotlari (ixtiyoriy, ID sini chiqaramiz)
-    user = UserSerializer(read_only=True) # Yoki user_id = serializers.PrimaryKeyRelatedField(read_only=True)
+    user = UserSerializer(read_only=True)  # Yoki user_id = serializers.PrimaryKeyRelatedField(read_only=True)
 
     # Status, delivery_type, payment_type uchun tushunarli nomlarni chiqarish (ixtiyoriy)
     # status_display = serializers.CharField(source='get_status_display', read_only=True)
@@ -192,7 +234,7 @@ class OrderSerializer(serializers.ModelSerializer):
         fields = [
             'id',
             'user',
-            'status', # Hozircha kodini chiqaramiz ('new', 'preparing', ...)
+            'status',  # Hozircha kodini chiqaramiz ('new', 'preparing', ...)
             # 'status_display', # Agar yuqoridagi kabi qo'shilsa
             'total_price',
             'delivery_type',
@@ -203,7 +245,7 @@ class OrderSerializer(serializers.ModelSerializer):
             'payment_type',
             # 'payment_type_display',
             'notes',
-            'items', # Buyurtma tarkibi
+            'items',  # Buyurtma tarkibi
             'created_at',
             'updated_at',
         ]
@@ -212,7 +254,7 @@ class OrderSerializer(serializers.ModelSerializer):
 class CheckoutSerializer(serializers.Serializer):
     """Checkout uchun kiruvchi ma'lumotlarni tekshiradi."""
     delivery_type = serializers.ChoiceField(
-        choices=Order.DELIVERY_CHOICES, # Modelldagi tanlovlardan olish
+        choices=Order.DELIVERY_CHOICES,  # Modelldagi tanlovlardan olish
         required=True
     )
     address = serializers.CharField(required=False, allow_blank=True)
@@ -222,7 +264,8 @@ class CheckoutSerializer(serializers.Serializer):
         choices=Order.PAYMENT_CHOICES,
         required=True
     )
-    notes = serializers.CharField(required=False, allow_blank=True, style={'base_template': 'textarea.html'}) # Katta matn maydoni (ixtiyoriy)
+    notes = serializers.CharField(required=False, allow_blank=True,
+                                  style={'base_template': 'textarea.html'})  # Katta matn maydoni (ixtiyoriy)
 
     def validate(self, data):
         """
@@ -240,7 +283,7 @@ class CheckoutSerializer(serializers.Serializer):
                 )
             # Agar lokatsiya berilsa, ikkalasi ham bo'lishi kerakligini tekshirish mumkin
             if (latitude is not None and longitude is None) or (latitude is None and longitude is not None):
-                 raise serializers.ValidationError("'latitude' va 'longitude' birga berilishi kerak.")
+                raise serializers.ValidationError("'latitude' va 'longitude' birga berilishi kerak.")
 
         # Boshqa validatsiyalarni shu yerga qo'shish mumkin
         return data
