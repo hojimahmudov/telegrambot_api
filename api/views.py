@@ -1,6 +1,7 @@
 # api/views.py
 
 from rest_framework import viewsets, permissions, generics, status
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
@@ -232,8 +233,6 @@ class OTPVerificationView(APIView):
         return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
-# --- SAVAT VIEW'I ---
-
 class CartView(APIView):
     """
     Foydalanuvchining savatchasi bilan ishlash uchun View.
@@ -440,6 +439,31 @@ class CheckoutView(APIView):
         # --- Yaratilgan buyurtmani qaytaramiz ---
         order_serializer = OrderSerializer(order, context={'request': request})
         return Response(order_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class OrderHistoryView(generics.ListAPIView):
+    """
+    Autentifikatsiyadan o'tgan foydalanuvchining buyurtmalar tarixini
+    ro'yxat ko'rinishida qaytaradi (paginatsiya bilan).
+    """
+    serializer_class = OrderSerializer
+    permission_classes = [permissions.IsAuthenticated] # Faqat login qilganlar ko'ra oladi
+    # Paginatsiyani sozlash mumkin (agar settings.py da global belgilanmagan bo'lsa)
+    pagination_class = PageNumberPagination # yoki boshqa turdagi pagination
+
+    def get_queryset(self):
+        """
+        Faqat joriy foydalanuvchiga tegishli buyurtmalarni,
+        yangi yaratilganlari birinchi bo'lib qaytaradi.
+        Optimalizatsiya uchun bog'liq ma'lumotlarni oldindan oladi.
+        """
+        user = self.request.user
+        return Order.objects.filter(user=user).order_by('-created_at').prefetch_related(
+            'items', # OrderItem'larni olish uchun
+            'items__product__translations', # Mahsulot tarjimalarini olish uchun
+            'items__product__category__translations', # Kategoriya tarjimalarini olish uchun
+            'pickup_branch__working_hours' # Filial ish vaqtlarini olish uchun (agar kerak bo'lsa)
+        )
 
 
 class BranchListView(generics.ListAPIView):

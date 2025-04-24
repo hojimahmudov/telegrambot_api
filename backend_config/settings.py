@@ -165,8 +165,9 @@ REST_FRAMEWORK = {
     'DEFAULT_PERMISSION_CLASSES': (
         'rest_framework.permissions.IsAuthenticatedOrReadOnly',
         # Ko'rish uchun ruxsat, o'zgartirish uchun login talab qiladi
-    )
-    # Boshqa sozlamalar keyinroq qo'shilishi mumkin (pagination, filtering va h.k.)
+    ),
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 10
 }
 
 # Simple JWT sozlamalari
