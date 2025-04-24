@@ -274,16 +274,20 @@ class Branch(models.Model):
         return self.name
 
     def is_open_now(self):
-        """Filial hozir (server vaqti bilan) ochiq yoki yopiqligini tekshiradi."""
-        now = timezone.now().time()  # Joriy vaqt (soat, daqiqa, ...)
-        today_weekday = timezone.now().weekday()  # Haftaning kuni (0=Dushanba, 6=Yakshanba)
+        # Joriy vaqtni loyihaning TIME_ZONE'iga o'tkazamiz
+        now_local_dt = timezone.localtime(timezone.now())
+        now_local_time = now_local_dt.time()  # Mahalliy vaqtning time qismi (naive)
+        current_weekday = now_local_dt.weekday()  # Mahalliy vaqtning hafta kuni
 
-        # Agar filial uchun bugunga ish vaqti kiritilgan bo'lsa
-        working_hours_today = self.working_hours.filter(weekday=today_weekday)
+        working_hours_today = self.working_hours.filter(weekday=current_weekday)
+
         for wh in working_hours_today:
-            if wh.from_hour <= now <= wh.to_hour:
-                return True  # Agar joriy vaqt ish vaqti oralig'ida bo'lsa
-        return False  # Agar bugun uchun ish vaqti topilmasa yoki joriy vaqt mos kelmasa
+            if wh.to_hour == datetime.time(0, 0):
+                if wh.from_hour <= now_local_time:
+                    return True
+            elif wh.from_hour <= now_local_time and now_local_time < wh.to_hour:
+                return True
+        return False
 
 
 class WorkingHours(models.Model):

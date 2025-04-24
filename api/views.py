@@ -14,14 +14,14 @@ from decimal import Decimal  # <-- Narxlar bilan ishlash uchun
 # Modellarni import qilamiz
 from .models import (
     User, Category, Product, Cart, CartItem,
-    Order, OrderItem  # <-- Buyurtma modellari
+    Order, OrderItem, Branch
 )
 # Serializer'larni import qilamiz
 from .serializers import (
     UserSerializer, CategorySerializer, ProductSerializer,
     RegistrationSerializer, OTPVerificationSerializer,
     CartSerializer, CartItemSerializer,
-    OrderSerializer, OrderItemSerializer, CheckoutSerializer  # <-- Buyurtma serializer'lari
+    OrderSerializer, OrderItemSerializer, CheckoutSerializer, BranchSerializer
 )
 
 
@@ -414,3 +414,13 @@ class CheckoutView(APIView):
         # Yaratilgan buyurtmani OrderSerializer orqali qaytaramiz
         order_serializer = OrderSerializer(order, context={'request': request})
         return Response(order_serializer.data, status=status.HTTP_201_CREATED)
+
+
+class BranchListView(generics.ListAPIView):
+    """
+    Barcha aktiv filiallar ro'yxatini qaytaradi.
+    Har bir filial uchun ish vaqtlari va hozirgi ochiq/yopiqlik statusi ham qo'shiladi.
+    """
+    queryset = Branch.objects.filter(is_active=True).prefetch_related('working_hours') # Faqat aktiv filiallar
+    serializer_class = BranchSerializer
+    permission_classes = [permissions.AllowAny] # Filiallar ro'yxati hammaga ochiq
