@@ -51,19 +51,35 @@ class ProductAdmin(TranslatableAdmin):  # <-- TranslatableAdmin'dan meros olamiz
 
 # WorkingHours modelini Branch adminida inline ko'rsatish uchun
 def time_choices(interval_minutes=30):
-    """Belgilangan interval bilan vaqt tanlovlarini generatsiya qiladi."""
+    """Generates time choices with specified interval using minutes, includes 23:59."""
     choices = []
-    # datetime.time obyektlari bilan ishlash aniqroq
-    current_time = time(0, 0)
-    end_time = time(23, 30)
-    interval = timedelta(minutes=interval_minutes)
+    start_minutes = 0  # 00:00
+    # Iterate up to but NOT including 24*60 (midnight of next day)
+    total_minutes_in_day = 24 * 60
 
-    while current_time <= end_time:
-        time_str = current_time.strftime("%H:%M")
-        choices.append((current_time, time_str))  # Qiymat sifatida time obyektini saqlaymiz
-        # Vaqtni intervalga oshiramiz (datetime yaratib qo'shish kerak)
-        dt_temp = datetime.datetime.combine(datetime.date.today(), current_time) + interval
-        current_time = dt_temp.time()
+    current_minutes = start_minutes
+    while current_minutes < total_minutes_in_day:
+        hours = current_minutes // 60
+        minutes = current_minutes % 60
+        # Handle potential errors if hours exceed 23 (shouldn't with < total_minutes_in_day)
+        try:
+            current_time = time(hours, minutes)
+            time_str = current_time.strftime("%H:%M")
+            choices.append((current_time, time_str))
+        except ValueError:
+            # Should not happen with current logic, but as a safeguard
+            pass
+
+            # Increment minutes
+        current_minutes += interval_minutes
+
+    # Add 23:59 specifically if not already the last interval step
+    time_2359 = time(23, 59)
+    if not choices or choices[-1][0] != time_2359:
+        # Ensure 23:59 wasn't naturally generated if interval=1
+        if time_2359 not in [t[0] for t in choices]:
+            choices.append((time_2359, "23:59"))
+
     return choices
 
 
