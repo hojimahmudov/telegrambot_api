@@ -18,7 +18,7 @@ class UserSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         # API'da ko'rinadigan maydonlar
-        fields = ['id', 'telegram_id', 'phone_number', 'username', 'first_name', 'last_name']
+        fields = ['id', 'telegram_id', 'phone_number', 'username', 'first_name', 'last_name', 'language_code']
         # Ba'zi maydonlarni faqat o'qish uchun qilish mumkin (masalan, API orqali telegram_id'ni o'zgartirib bo'lmaydi)
         read_only_fields = ['telegram_id']
 

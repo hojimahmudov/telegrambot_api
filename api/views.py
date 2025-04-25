@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from .utils import send_telegram_otp
+from .utils import send_telegram_otp, logger
 from django.utils import timezone
 import random
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -165,15 +165,29 @@ class RegistrationView(APIView):
             user.otp_created_at = timezone.now()
             user.save()  # Foydalanuvchini (yangi yoki eski) OTP bilan saqlaymiz
 
-            # --- SMS Yuborish Imitatsiyasi ---
-            # Haqiqiy loyihada bu yerda SMS Gateway API chaqiriladi
-            print(f"--------- DEBUG OTP ---------")
-            print(f"--- OTP for {phone_number}: {otp} ---")
-            print(f"-----------------------------")
-            # ------------------------------
+            # --- OTP Kodni Telegram Orqali Yuborish ---
+            otp = user.otp_code  # Saqlangan OTP kodni olamiz
+            user_telegram_id = user.telegram_id  # User obyektidan telegram_id ni olamiz
+            # Funksiyani chaqiramiz
+            message_sent = send_telegram_otp(user_telegram_id, otp)
+            # ----------------------------------------
+
+            # --- Eski SMS yoki print qismini olib tashlaymiz ---
+            # sms_message = f"Sizning tasdiqlash kodingiz: {otp}"
+            # sms_sent = send_sms(phone_number, sms_message)
+            # print(f"--- OTP for {phone_number}: {otp} ---")
+            # --------------------------------------------------
+
+            if not message_sent:
+                # Agar xabar yuborishda muammo bo'lsa (masalan, user botni bloklagan)
+                # Hozircha faqat log yozamiz, lekin foydalanuvchiga boshqacha javob qaytarish mumkin
+                logger.warning(f"{user_telegram_id} ga OTP xabari yuborishda muammo bo'ldi.")
+                # Muhim: Xabar yuborilmasa ham, ro'yxatdan o'tish davom etaveradi.
+                # Foydalanuvchi keyinroq qayta urinib ko'rishi mumkin.
 
             return Response(
-                {"message": f"Tasdiqlash kodi {phone_number} raqamiga 'yuborildi'. (Debug uchun konsolga qarang)"},
+                # Javob xabarini o'zgartiramiz
+                {"message": f"Tasdiqlash kodi Telegram orqali {user_telegram_id} ga yuborildi."},
                 status=status.HTTP_200_OK
             )
         # Agar serializer validatsiyadan o'tmasa

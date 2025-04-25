@@ -44,6 +44,14 @@ class User(AbstractUser):
         null=True,
         blank=True
     )
+    language_code = models.CharField(
+        _("Til kodi"),
+        max_length=2,
+        choices=settings.LANGUAGES,  # settings.py dagi LANGUAGES ro'yxatidan oladi
+        default=settings.LANGUAGE_CODE,  # Standart tilni oladi (masalan, 'uz')
+        null=True,  # Vaqtinchalik null bo'lishi mumkin
+        blank=True  # Admin panelida bo'sh bo'lishi mumkin
+    )
     # --- is_active maydonining standart qiymatini o'zgartiramiz ---
     is_active = models.BooleanField(
         _('active'),
