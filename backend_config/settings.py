@@ -40,6 +40,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'corsheaders',
     # Qo'shilgan kutubxonalar
     'rest_framework',
     'rest_framework_simplejwt',
@@ -54,6 +55,7 @@ MIDDLEWARE = [
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
+    'corsheaders.middleware.CorsMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
@@ -176,3 +178,16 @@ SIMPLE_JWT = {
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),  # Refresh token yashash muddati (masalan, 1 kun)
     # Boshqa sozlamalar...
 }
+
+# CORS Sozlamalari
+# Ishlab chiqish (development) uchun hammaga ruxsat berish (keyinroq aniq domenlarga o'zgartiring)
+CORS_ALLOW_ALL_ORIGINS = True
+# Yoki aniqroq:
+# CORS_ALLOWED_ORIGINS = [
+#     "http://localhost:8080", # Agar local test serveringiz shu portda bo'lsa
+#     "http://127.0.0.1:8080",
+#     # Keyinchalik Mini App hosting qilinadigan manzil(lar)
+# ]
+# CORS_ALLOW_CREDENTIALS = True # Agar cookie yoki authorization header kerak bo'lsa
+
+TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')

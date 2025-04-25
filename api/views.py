@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
+from .utils import send_telegram_otp
 from django.utils import timezone
 import random
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -447,9 +448,9 @@ class OrderHistoryView(generics.ListAPIView):
     ro'yxat ko'rinishida qaytaradi (paginatsiya bilan).
     """
     serializer_class = OrderSerializer
-    permission_classes = [permissions.IsAuthenticated] # Faqat login qilganlar ko'ra oladi
+    permission_classes = [permissions.IsAuthenticated]  # Faqat login qilganlar ko'ra oladi
     # Paginatsiyani sozlash mumkin (agar settings.py da global belgilanmagan bo'lsa)
-    pagination_class = PageNumberPagination # yoki boshqa turdagi pagination
+    pagination_class = PageNumberPagination  # yoki boshqa turdagi pagination
 
     def get_queryset(self):
         """
@@ -459,11 +460,70 @@ class OrderHistoryView(generics.ListAPIView):
         """
         user = self.request.user
         return Order.objects.filter(user=user).order_by('-created_at').prefetch_related(
-            'items', # OrderItem'larni olish uchun
-            'items__product__translations', # Mahsulot tarjimalarini olish uchun
-            'items__product__category__translations', # Kategoriya tarjimalarini olish uchun
-            'pickup_branch__working_hours' # Filial ish vaqtlarini olish uchun (agar kerak bo'lsa)
+            'items',  # OrderItem'larni olish uchun
+            'items__product__translations',  # Mahsulot tarjimalarini olish uchun
+            'items__product__category__translations',  # Kategoriya tarjimalarini olish uchun
+            'pickup_branch__working_hours'  # Filial ish vaqtlarini olish uchun (agar kerak bo'lsa)
         )
+
+
+class OrderDetailView(generics.RetrieveAPIView):
+    """
+    Autentifikatsiyadan o'tgan foydalanuvchiga tegishli bo'lgan yagona
+    buyurtmaning batafsil ma'lumotlarini qaytaradi.
+    """
+    serializer_class = OrderSerializer
+    permission_classes = [permissions.IsAuthenticated]  # Faqat buyurtma egasi ko'ra oladi
+    lookup_field = 'pk'  # URL'dan qaysi maydon orqali qidirish (standart 'pk', ya'ni ID)
+
+    def get_queryset(self):
+        """
+        Faqat joriy foydalanuvchiga tegishli buyurtmalarni qidirish uchun
+        queryset'ni filterlaydi. Bu boshqa birovning buyurtmasini
+        ID sini topib ko'rishning oldini oladi.
+        """
+        user = self.request.user
+        # History'dagiga o'xshash prefetch qo'shamiz
+        return Order.objects.filter(user=user).prefetch_related(
+            'items',
+            'items__product__translations',
+            'items__product__category__translations',
+            'pickup_branch__working_hours'
+        )
+
+
+class OrderCancelView(APIView):
+    """
+    Foydalanuvchiga o'ziga tegishli buyurtmani bekor qilish (cancel)
+    uchun endpoint (faqat 'new' statusida bo'lsa).
+    """
+    permission_classes = [permissions.IsAuthenticated]  # Faqat login qilganlar
+
+    def post(self, request, pk=None):
+        """
+        POST so'rovi kelganda buyurtmani bekor qilishga harakat qiladi.
+        'pk' URL'dan olinadi (buyurtma IDsi).
+        """
+        user = request.user
+        # Buyurtmani topamiz va u shu foydalanuvchiga tegishli ekanligini tekshiramiz
+        order = get_object_or_404(Order, pk=pk, user=user)
+
+        # Buyurtma statusini tekshiramiz
+        if order.status == 'new':
+            # Agar status 'new' bo'lsa, bekor qilamiz
+            order.status = 'cancelled'
+            order.save(update_fields=['status'])  # Faqat status maydonini yangilaymiz
+            # Muvaffaqiyatli javob qaytaramiz
+            return Response(
+                {"message": "Buyurtma muvaffaqiyatli bekor qilindi.", "status": order.status},
+                status=status.HTTP_200_OK
+            )
+        else:
+            # Agar status 'new' bo'lmasa, xatolik qaytaramiz
+            return Response(
+                {"error": f"'{order.get_status_display()}' holatidagi buyurtmani bekor qilib bo'lmaydi."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
 
 class BranchListView(generics.ListAPIView):

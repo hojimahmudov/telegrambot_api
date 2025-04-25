@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html lang="uz">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Kafe Buyurtma</title>
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        /* Juda oddiy stil (keyinchalik yaxshilash mumkin) */
+        body { font-family: sans-serif; padding: 10px; }
+        .category { border: 1px solid #ddd; margin-bottom: 5px; padding: 8px; cursor: pointer; }
+        .category img { max-width: 50px; vertical-align: middle; margin-right: 10px; }
+        #loading { text-align: center; padding: 20px; }
+        #error { color: red; text-align: center; padding: 20px; }
+    </style>
+</head>
+<body>
+
+<h1>Kategoriyalar</h1>
+
+<div id="categories-list">
+    <div id="loading">Yuklanmoqda...</div>
+    <div id="error" style="display: none;">Xatolik yuz berdi.</div>
+</div>
+<hr>
+<h2>Mahsulotlar</h2>
+<div id="products-list">
+    <p>Iltimos, yuqoridan kategoriya tanlang.</p>
+</div>
+<script src="script.js"></script>
+
+</body>
+</html>

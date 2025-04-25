@@ -5,3 +5,5 @@ psycopg2-binary>=2.9,<2.10  # PostgreSQL adapter (agar PostgreSQL ishlatsangiz)
 djangorestframework-simplejwt>=5.0,<5.4 # JWT autentifikatsiyasi uchun
 python-dotenv>=0.20,<1.2 # .env faylidan sozlamalarni o'qish uchun
 django-parler>=2.3,<2.4
+django_cors_headers
+python-telegram-bot[httpx]>=20.0,<21.0
