@@ -6,6 +6,7 @@ import os
 import httpx  # API chaqiruvlari uchun
 import json
 import re
+from telegram.constants import ParseMode
 
 # .env faylidan o'qish uchun (agar o'rnatilgan bo'lsa)
 from dotenv import load_dotenv
@@ -215,6 +216,109 @@ async def update_language_in_db(context: ContextTypes.DEFAULT_TYPE, user_id: int
         # Agar tilni DB ga yozishda xatolik bo'lsa (masalan, API ishlamayapti)
         # Buni faqat logga yozamiz, bot ishlashda davom etaveradi
         logger.warning(f"Failed to update language preference in DB for user {user_id}. Response: {api_response}")
+
+
+async def show_category_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Kategoriyalarni oladi va inline tugmalar bilan xabar yuboradi."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+
+    loading_text = "Kategoriyalar yuklanmoqda..." if lang_code == 'uz' else "Загрузка категорий..."
+    # Vaqtinchalik xabar yuborish (keyin o'chiriladi yoki tahrirlanadi)
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=loading_text)
+
+    categories_response = await make_api_request(context, 'GET', 'categories/', user_id)
+    final_text = ""
+    final_markup = None
+
+    if categories_response and not categories_response.get('error'):
+        categories = categories_response.get('results', [])
+        if categories:
+            keyboard = [[InlineKeyboardButton(c.get('name', 'N/A'), callback_data=f"cat_{c.get('id')}")] for c in
+                        categories]
+            final_markup = InlineKeyboardMarkup(keyboard)
+            final_text = "Kategoriyalardan birini tanlang:" if lang_code == 'uz' else "Выберите одну из категорий:"
+        else:
+            final_text = "Kategoriyalar topilmadi." if lang_code == 'uz' else "Категории не найдены."
+    else:
+        error_detail = categories_response.get('detail',
+                                               'Noma\'lum xatolik') if categories_response else 'Server bilan bog\'lanish xatosi'
+        final_text = f"Kategoriyalarni olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить категории: {error_detail}"
+
+    # Vaqtinchalik xabarni tahrirlaymiz
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=sent_message.message_id,
+            text=final_text,
+            reply_markup=final_markup
+        )
+    except Exception as e:
+        logger.error(f"Error editing category list message: {e}")
+        # Agar tahrirlab bo'lmasa, eski xabarni o'chirib, yangisini yuboramiz
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
+        except:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=final_markup)
+
+
+async def show_product_list(update: Update, context: ContextTypes.DEFAULT_TYPE, category_id: int):
+    """Berilgan kategoriya uchun mahsulotlarni rasm+tugma ko'rinishida chiqaradi."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+    context.user_data['current_category_id'] = category_id  # Ortga qaytish uchun saqlaymiz
+
+    loading_text = "Mahsulotlar ro'yxati yuklanmoqda..." if lang_code == 'uz' else "Загрузка списка продуктов..."
+    sent_message = await context.bot.send_message(chat_id=chat_id, text=loading_text)
+
+    products_response = await make_api_request(context, 'GET', f'products/?category_id={category_id}', user_id)
+
+    # Avvalgi xabarni (loading...) o'chirishga harakat qilamiz
+    try:
+        await context.bot.delete_message(chat_id=chat_id, message_id=sent_message.message_id)
+    except Exception:
+        pass
+
+    if products_response and not products_response.get('error'):
+        products = products_response.get('results', [])
+        category_info = products[0].get('category', {}) if products else {}
+        category_name = category_info.get('name', 'Kategoriya')
+        category_image_url = category_info.get('image_url')
+
+        keyboard = []
+        caption = f"<b>{category_name}</b>\n\nMahsulotni tanlang:" if lang_code == 'uz' else f"<b>{category_name}</b>\n\nВыберите продукт:"
+
+        if products:
+            for product in products:
+                button = InlineKeyboardButton(product.get('name', 'Nomsiz'), callback_data=f"prod_{product.get('id')}")
+                keyboard.append([button])
+        else:
+            caption = "Bu kategoriyada mahsulotlar topilmadi." if lang_code == 'uz' else "В этой категории товары не найдены."
+
+        back_button_text = "< Ortga" if lang_code == 'uz' else "< Назад"
+        keyboard.append([InlineKeyboardButton(back_button_text, callback_data="back_to_categories")])
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        photo_url = category_image_url
+        if photo_url:
+            try:
+                await context.bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption,
+                                             reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except Exception as e:
+                logger.error(f"Failed to send category photo {photo_url}: {e}")
+                await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup,
+                                               parse_mode=ParseMode.HTML)
+        else:
+            await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup,
+                                           parse_mode=ParseMode.HTML)
+    else:
+        error_detail = products_response.get('detail',
+                                             'Noma\'lum xatolik') if products_response else 'Server bilan bog\'lanish xatosi'
+        reply_text = f"Mahsulotlarni olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить товары: {error_detail}"
+        await context.bot.send_message(chat_id=chat_id, text=reply_text)
 
 
 # --- /start Komandasi Uchun Handler ---
@@ -439,6 +543,97 @@ async def otp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str
         return WAITING_OTP
 
 
+async def show_cart(update: Update, context: ContextTypes.DEFAULT_TYPE, cart_data: dict):
+    """API dan kelgan savat ma'lumotlarini formatlab foydalanuvchiga ko'rsatadi."""
+    user_id = update.effective_user.id
+    lang_code = get_user_lang(context)
+    chat_id = update.effective_chat.id
+
+    items = cart_data.get('items', [])
+    total_price = cart_data.get('total_price', "0.00")  # String kelishi mumkin
+
+    if not items:
+        cart_empty_text = "Savat bo'sh." if lang_code == 'uz' else "Корзина пуста."
+        # Oldingi xabarni tahrirlashga urinish (agar callbackdan kelgan bo'lsa)
+        message_to_edit = update.callback_query.message if update.callback_query else None
+        try:
+            if message_to_edit:
+                await update.callback_query.edit_message_text(cart_empty_text, reply_markup=None)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text=cart_empty_text)
+        except Exception as e:  # Agar tahrirlab bo'lmasa (masalan, xabar turi boshqa)
+            logger.warning(f"Could not edit/send empty cart message: {e}")
+            # Agar xatolik bo'lsa, yangi xabar yuboramiz
+            if not message_to_edit: await context.bot.send_message(chat_id=chat_id, text=cart_empty_text)
+
+        return
+
+    # HTML formatlashni ishlatamiz
+    message_text = "🛒 <b>Sizning Savatingiz:</b>\n\n" if lang_code == 'uz' else "🛒 <b>Ваша Корзина:</b>\n\n"
+    keyboard = []  # Inline tugmalar uchun
+
+    for item in items:
+        product = item.get('product', {})
+        product_name = product.get('name', 'Noma\'lum mahsulot')
+        quantity = item.get('quantity', 0)
+        item_total = item.get('item_total', 'N/A')
+        item_id = item.get('id')  # Tugmalar uchun kerak
+
+        message_text += f"🔹 <b>{product_name}</b>\n"
+        message_text += f"   {quantity} x {product.get('price', 'N/A')} so'm = {item_total} so'm\n"
+
+        # --- Har bir item uchun +/-/del tugmalarini qo'shamiz ---
+        keyboard.append([
+            InlineKeyboardButton("➖", callback_data=f"cart_decr_{item_id}"),
+            InlineKeyboardButton(str(quantity), callback_data=f"cart_info_{item_id}"),  # Sonni ko'rsatish (bosilmaydi)
+            InlineKeyboardButton("➕", callback_data=f"cart_incr_{item_id}"),
+            InlineKeyboardButton("🗑️", callback_data=f"cart_del_{item_id}")  # O'chirish belgisi
+        ])
+        # ----------------------------------------------------
+        message_text += "--------------------\n"
+
+    total_text = f"\n Jami: <b>{total_price}</b> so'm" if lang_code == 'uz' else f"\n Итого: <b>{total_price}</b> сум"
+    message_text += total_text
+
+    # Umumiy savat amallari uchun tugmalar
+    checkout_button_text = "➡️ Rasmiylashtirish" if lang_code == 'uz' else "➡️ Оформить заказ"
+    refresh_button_text = "🔄 Yangilash" if lang_code == 'uz' else "🔄 Обновить"
+    keyboard.append([
+        InlineKeyboardButton(checkout_button_text, callback_data="start_checkout")
+    ])
+    # Yangilash tugmasini qo'shish (ixtiyoriy)
+    keyboard.append([InlineKeyboardButton(refresh_button_text, callback_data="cart_refresh")])
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Xabarni yuboramiz (yoki tahrirlaymiz agar refresh bo'lsa)
+    message_to_edit = update.callback_query.message if update.callback_query else None
+    try:
+        if message_to_edit:
+            await update.callback_query.edit_message_text(
+                text=message_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML  # <-- HTML PARSE MODE
+            )
+        else:
+            await context.bot.send_message(
+                chat_id=chat_id,
+                text=message_text,
+                reply_markup=reply_markup,
+                parse_mode=ParseMode.HTML  # <-- HTML PARSE MODE
+            )
+    except Exception as e:
+        logger.error(f"Error sending/editing cart message: {e}")
+        # Agar xatolik bo'lsa, formatlashsiz yuborishga harakat qilish
+        try:
+            if message_to_edit:
+                await update.callback_query.edit_message_text(text="Savatni ko'rsatishda xatolik.", reply_markup=None)
+            else:
+                await context.bot.send_message(chat_id=chat_id, text="Savatni ko'rsatishda xatolik.")
+        except:
+            pass
+
+
 # --- Autentifikatsiya Tekshiruvi va Keyingi Qadam ---
 async def ask_for_registration_or_show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Til tanlangandan keyin ishlaydi, autentifikatsiyani tekshiradi."""
@@ -500,13 +695,9 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     # Qaysi menyu tugmasi bosilganini tekshiramiz
     if message_text in ["🍽️ Menyu", "🍽️ Меню"]:
-        # Kategoriyalarni API dan olamiz
-        loading_text = "Kategoriyalar yuklanmoqda..." if lang_code == 'uz' else "Загрузка категорий..."
-        # Send loading message immediately
-        await update.message.reply_text(loading_text)
-
+        await show_category_list(update, context)  # <-- Yangi funksiyani chaqiramiz
+        return MAIN_MENU  # Yoki boshqa holat kerak bo'lsa
         categories_response = await make_api_request(context, 'GET', 'categories/', user_id)
-
         if categories_response and not categories_response.get('error'):
             categories = categories_response.get('results', [])
             if categories:
@@ -535,11 +726,49 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(reply_text)
         return next_state
 
+
     elif message_text in ["🛒 Savat", "🛒 Корзина"]:
-        reply_text = "Savat bo'limi..." if lang_code == 'uz' else "Раздел Корзина..."
-        # TODO: Call GET /cart/ API and display cart contents
-        await update.message.reply_text(reply_text)  # Send placeholder reply
-        return next_state
+
+        loading_text = "Savat yuklanmoqda..." if lang_code == 'uz' else "Загрузка корзины..."
+
+        await update.message.reply_text(loading_text)
+
+        # Savat ma'lumotlarini API dan olamiz
+
+        cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
+
+        if cart_response and not cart_response.get('error'):
+
+            # Yangi yordamchi funksiyani chaqiramiz
+
+            await show_cart(update, context, cart_response)
+
+            # show_cart o'zi xabar yuborgani uchun bu yerdan return qilamiz
+
+            return MAIN_MENU
+
+        elif cart_response and cart_response.get('status_code') == 401:
+
+            # make_api_request ichida xabar yuborilgan bo'lishi mumkin
+
+            logger.warning(f"Unauthorized attempt to view cart for user {user_id}")
+
+            # Bu yerda qo'shimcha xabar yuborish shart emas
+
+        else:
+
+            # Boshqa API xatoligi
+
+            error_detail = cart_response.get('detail',
+                                             'Noma\'lum xatolik') if cart_response else 'Server bilan bog\'lanish xatosi'
+
+            reply_text = f"Savatni olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить корзину: {error_detail}"
+
+            await update.message.reply_text(reply_text)  # Xatolik xabarini yuboramiz
+
+        # Bu yerda ham reply_text ishlatilmaydi endi
+
+        return MAIN_MENU  # Holat o'zgarmaydi
 
     elif message_text in ["📋 Buyurtmalarim", "📋 Мои заказы"]:
         reply_text = "Buyurtmalar tarixi..." if lang_code == 'uz' else "История заказов..."
@@ -574,70 +803,235 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 
 async def category_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Kategoriya tugmasi bosilganda ishlaydi."""
+    """Kategoriya tugmasi bosilganda ishlaydi, mahsulot nomlari ro'yxatini chiqaradi."""
     query = update.callback_query
-    await query.answer()  # Callbackga javob beramiz
+    await query.answer()  # Callbackga javob beramiz (loading ko'rsatmaydi)
+    user_id = query.from_user.id
+
+    try:
+        if not query.data or not query.data.startswith('cat_'): raise ValueError("Invalid callback data")
+        category_id = int(query.data.split('_')[1])
+        logger.info(f"User {user_id} selected category ID: {category_id}")
+        await show_product_list(update, context, category_id)  # <-- Yangi funksiyani chaqiramiz
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid category callback data: {query.data} - Error: {e}")
+        try:
+            await query.edit_message_text("Xatolik: Noto'g'ri kategoriya.")
+        except Exception as edit_e:
+            logger.error(f"Failed edit on invalid cat data: {edit_e}")
+    # Bu funksiya endi holat qaytarmaydi
+
+
+async def product_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mahsulot nomi tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
 
-    # callback_data dan kategoriya ID sini ajratib olamiz ('cat_<ID>')
     try:
-        category_id = int(query.data.split('_')[1])
-    except (IndexError, ValueError):
-        logger.warning(f"Invalid callback data received: {query.data}")
-        await query.edit_message_text("Xatolik: Noto'g'ri kategoriya tanlandi.")
+        if not query.data or not query.data.startswith('prod_'):
+            raise ValueError("Invalid callback data")
+        product_id = int(query.data.split('_')[1])
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid product callback data: {query.data} - Error: {e}")
+        try:
+            await query.edit_message_text("Xatolik: Noto'g'ri mahsulot ma'lumoti.")
+        except Exception as edit_e:
+            logger.error(f"Failed edit on invalid prod data: {edit_e}")
         return
 
-    logger.info(f"User {user_id} selected category ID: {category_id}")
+    logger.info(f"User {user_id} selected product ID: {product_id}")
 
-    # Mahsulotlarni yuklash xabarini chiqaramiz
-    loading_text = "Mahsulotlar yuklanmoqda..." if lang_code == 'uz' else "Загрузка продуктов..."
-    await query.edit_message_text(text=loading_text)  # Oldingi tugmalarni olib tashlaymiz
+    loading_text = "Mahsulot ma'lumotlari yuklanmoqda..." if lang_code == 'uz' else "Загрузка данных о продукте..."
+    try:
+        await query.edit_message_text(text=loading_text)  # Vaqtinchalik xabar
+    except Exception as e:
+        logger.warning(f"Could not edit message for loading product details: {e}")
+        await context.bot.send_message(chat_id=user_id, text=loading_text)
 
-    # API dan mahsulotlarni olamiz
-    products_response = await make_api_request(context, 'GET', f'products/?category_id={category_id}', user_id)
+    # API dan mahsulot detallarini olamiz
+    product_response = await make_api_request(context, 'GET', f'products/{product_id}/', user_id)
 
-    if products_response and not products_response.get('error'):
-        products = products_response.get('results', [])
-        if products:
-            # --- Tugmalar qismi o'zgaradi ---
-            keyboard = []  # Inline tugmalar uchun bo'sh massiv
-            message_text = f"--- {products[0].get('category', {}).get('name', '')} ---\n\n" if products else "Mahsulotlar:\n\n"
+    if product_response and not product_response.get('error'):
+        product = product_response
+        # Joriy kategoriya ID sini kontekstdan olamiz (Ortga tugmasi uchun)
+        category_id = context.user_data.get('current_category_id', None)  # Agar yo'q bo'lsa None
 
-            for product in products:
-                product_text = f"<b>{product.get('name', 'Nomsiz')}</b>\n"
-                description = product.get('description')
-                if description:
-                    product_text += f"<pre>{description}</pre>\n"
-                product_text += f"Narxi: {product.get('price', 'N/A')} so'm"
-                message_text += product_text + "\n"  # Matn qismi
+        # Caption yaratamiz
+        caption = f"<b>{product.get('name', 'Nomsiz')}</b>\n\n"
+        description = product.get('description')
+        if description:
+            caption += f"<pre>{description}</pre>\n\n"
+        caption += f"Narxi: {product.get('price', 'N/A')} so'm"
 
-                # Har bir mahsulot uchun alohida qatorda "Savatga qo'shish" tugmasi
-                add_button_text = "🛒 Savatga" if lang_code == 'uz' else "🛒 В корзину"
-                keyboard.append([
-                    InlineKeyboardButton(
-                        f"{add_button_text} ({product.get('name', '')[:15]}...)",  # Qisqa nom bilan
-                        callback_data=f"add_{product.get('id')}"  # Callback data: add_<product_id>
-                    )
-                ])
-                message_text += "--------------------\n"  # Ajratuvchi
+        # Tugmalarni yaratamiz (hozircha +/- ishlamaydi, Add faqat 1 dona qo'shadi)
+        qty = 1  # Hozircha standart miqdor
+        minus_button = InlineKeyboardButton("-", callback_data=f"p_noop_{product_id}")  # Hozircha hech narsa qilmaydi
+        qty_button = InlineKeyboardButton(str(qty), callback_data=f"p_info_{product_id}")  # Sonni ko'rsatadi
+        plus_button = InlineKeyboardButton("+", callback_data=f"p_noop_{product_id}")  # Hozircha hech narsa qilmaydi
+        add_cart_button_text = "🛒 Savatga" if lang_code == 'uz' else "🛒 В корзину"
+        add_cart_button = InlineKeyboardButton(add_cart_button_text,
+                                               callback_data=f"add_{product_id}")  # add_ callback ishlatamiz
+        back_button_text = "< Ortga" if lang_code == 'uz' else "< Назад"
+        # Ortga tugmasi callbackiga kategoriya ID sini qo'shamiz
+        back_button_callback = f"back_to_prod_list_{category_id}" if category_id else "back_to_categories"  # Agar kategoriya ID topilmasa, kategoriyalarga qaytadi
+        back_button = InlineKeyboardButton(back_button_text, callback_data=back_button_callback)
 
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            # Xabarni tahrirlaymiz yoki yangi yuboramiz
+        keyboard = [
+            [minus_button, qty_button, plus_button],
+            [add_cart_button],
+            [back_button]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Rasm URL ni olamiz
+        photo_url = product.get('image_url')
+
+        try:
+            # Avvalgi xabarni o'chiramiz
+            await query.delete_message()
+        except Exception as e:
+            logger.warning(f"Could not delete previous message: {e}")
+
+        # Rasm bo'lsa rasm bilan, bo'lmasa oddiy xabar yuboramiz
+        if photo_url:
             try:
-                await query.edit_message_text(message_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
-            except Exception as e:  # Agar xabar o'zgarmagan bo'lsa (masalan, matn bir xil)
-                logger.warning(f"Could not edit product list message, sending new: {e}")
-                await context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup,
+                await context.bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo_url,
+                    caption=caption,
+                    reply_markup=reply_markup,
+                    parse_mode=ParseMode.HTML
+                )
+            except Exception as e:
+                logger.error(f"Failed to send product photo {photo_url}: {e}")
+                # Rasm yuborishda xatolik bo'lsa, oddiy matn yuboramiz
+                await context.bot.send_message(chat_id=user_id, text=caption, reply_markup=reply_markup,
                                                parse_mode=ParseMode.HTML)
         else:
-            reply_text = "Bu kategoriyada mahsulotlar topilmadi." if lang_code == 'uz' else "В этой категории товары не найдены."
-            await query.edit_message_text(text=reply_text)
+            await context.bot.send_message(chat_id=user_id, text=caption, reply_markup=reply_markup,
+                                           parse_mode=ParseMode.HTML)
+
     else:
-        error_detail = products_response.get('detail',
-                                             'Noma\'lum xatolik') if products_response else 'Server bilan bog\'lanish xatosi'
-        reply_text = f"Mahsulotlarni olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить товары: {error_detail}"
-        await query.edit_message_text(text=reply_text)
+        # API xatoligi
+        error_detail = product_response.get('detail',
+                                            'Noma\'lum xatolik') if product_response else 'Server bilan bog\'lanish xatosi'
+        reply_text = f"Mahsulot ma'lumotlarini olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить данные продукта: {error_detail}"
+        try:
+            await query.edit_message_text(text=reply_text)
+        except Exception as e:
+            logger.warning(f"Could not edit error message after product detail fetch fail: {e}")
+            await context.bot.send_message(chat_id=user_id, text=reply_text)
+
+
+async def back_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ 'Ortga' tugmalari bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    callback_data = query.data
+    logger.info(f"User {user_id} pressed back button: {callback_data}")
+
+    try:
+        # Avvalgi (rasmli) xabarni o'chirishga harakat qilamiz
+        await query.delete_message()
+    except Exception as e:
+        logger.warning(f"Could not delete message on back button press: {e}")
+
+    if callback_data == 'back_to_categories':
+        # Kategoriyalar ro'yxatini ko'rsatamiz
+        await show_category_list(update, context)  # <-- Yangi funksiya
+
+    elif callback_data.startswith('back_to_prod_list_'):
+        try:
+            category_id = int(callback_data.split('_')[-1])
+            # Mahsulotlar ro'yxatini ko'rsatamiz
+            await show_product_list(update, context, category_id)  # <-- Yangi funksiya
+        except (IndexError, ValueError, TypeError):
+            logger.warning(f"Invalid back_to_prod_list callback: {callback_data}")
+            # Agar xatolik bo'lsa, kategoriyalarga qaytaramiz
+            await show_category_list(update, context)
+
+
+async def quantity_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Mahsulot detallaridagi +/-/son tugmalari uchun vaqtinchalik placeholder handler.
+    Hozircha hech narsa qilmaydi, faqat tugma bosilganini bildiradi.
+    """
+    query = update.callback_query
+    # Foydalanuvchiga tugma bosilgani, lekin hozircha ishlamasligini bildirish uchun:
+    try:
+        # qisqa bildirishnoma (ekran tepasida chiqadi)
+        await query.answer("Bu tugma hozircha aktiv emas.")
+    except Exception as e:
+        logger.warning(f"Could not answer quantity noop callback: {e}")
+
+    logger.info(f"User {query.from_user.id} pressed a quantity (noop) button with data: {query.data}")
+    # Bu yerda hech qanday holat o'zgarishi yoki API chaqiruvi yo'q
+
+
+async def add_to_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Savatga qo'shish" (add_{product_id}) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    # Provide immediate feedback to the user
+    await query.answer("Savatga qo'shilmoqda...")
+
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)  # Assumes helper exists
+
+    try:
+        # Extract product ID from callback data 'add_<ID>'
+        if not query.data or not query.data.startswith('add_'):
+            raise ValueError("Invalid callback data format")
+        product_id = int(query.data.split('_')[1])
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid callback data for add to cart: {query.data} - Error: {e}")
+        # Use answer for brief errors if possible
+        await query.answer("Xatolik yuz berdi!", show_alert=True)
+        # Optionally send a message if more detail needed
+        # await context.bot.send_message(chat_id=user_id, text="Mahsulot ID sini aniqlashda xatolik.")
+        return
+
+    logger.info(f"User {user_id} requested to add product ID: {product_id}")
+
+    # API ga POST /cart/ so'rovini yuboramiz
+    cart_data = {
+        "product_id": product_id,
+        "quantity": 1  # Add 1 quantity by default
+    }
+    # make_api_request handles Authentication header and language
+    api_response = await make_api_request(context, 'POST', 'cart/', user_id, data=cart_data)
+
+    if api_response and not api_response.get('error'):
+        # Muvaffaqiyatli qo'shildi
+        success_text = "✅ Savatga qo'shildi!" if lang_code == 'uz' else "✅ Добавлено в корзину!"
+        # Show non-alert answer for success
+        await query.answer(success_text, show_alert=False)
+        # Optionally: Update the message? Difficult if it's a product list.
+        # Maybe send a notification message?
+        # await context.bot.send_message(chat_id=user_id, text=success_text) # Alternative notification
+    else:
+        # Xatolik yuz berdi
+        error_detail = api_response.get('detail',
+                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
+        logger.warning(f"Failed to add item {product_id} to cart for user {user_id}: {error_detail}")
+        error_text = f"Xatolik: {error_detail[:100]}"  # Limit error length
+        # Show alert for errors
+        await query.answer(error_text, show_alert=True)
+
+
+async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Rasmiylashtirish" tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()  # Tugma bosilganini bildirish
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    logger.info(f"User {user_id} initiated checkout.")
+    # TODO: Checkout uchun alohida ConversationHandler boshlash kerak
+    reply_text = "Buyurtmani rasmiylashtirish boshlanmoqda..." if lang_code == 'uz' else "Начинаем оформление заказа..."
+    await query.edit_message_text(text=reply_text)  # Tugmalarni olib tashlaydi
 
 
 # --- Asosiy 'main' funksiya ---
@@ -690,6 +1084,14 @@ def main() -> None:
     application.add_handler(conv_handler)
 
     application.add_handler(CallbackQueryHandler(category_selected_callback, pattern='^cat_'))
+    application.add_handler(CallbackQueryHandler(product_selected_callback, pattern='^prod_'))
+    application.add_handler(
+        CallbackQueryHandler(add_to_cart_callback, pattern='^add_'))
+    application.add_handler(CallbackQueryHandler(quantity_noop_callback, pattern='^p_noop_'))
+    application.add_handler(CallbackQueryHandler(quantity_noop_callback,
+                                                 pattern='^p_info_'))
+    application.add_handler(CallbackQueryHandler(back_button_callback, pattern='^back_to_'))
+    application.add_handler(CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$'))
 
     # Botni ishga tushirish
     logger.info("Starting bot...")

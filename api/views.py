@@ -265,9 +265,37 @@ class CartView(APIView):
 
     # --- GET Method: Savatni ko'rish ---
     def get(self, request):
-        cart = self.get_or_create_cart(request.user)
-        serializer = CartSerializer(cart, context={
-            'request': request})  # Context qo'shish rasm URL'lari uchun kerak bo'lishi mumkin
+        user = request.user
+        # --- Savatni olamiz (yoki yaratamiz) VA OPTIMALLASHTIRAMIZ ---
+        try:
+            # Avval get_or_create bilan savatni olamiz yoki yaratamiz
+            cart, created = Cart.objects.get_or_create(user=user)
+            if created:
+                # Agar yangi yaratilgan bo'lsa, logga yozamiz
+                logger.info(f"Created new cart (ID: {cart.pk}) for user {user.pk}")
+
+            # Endi shu savatni (yoki topilganini) optimallashtirilgan holda qayta olamiz
+            # Bu serializer ishlashi uchun kerakli barcha ma'lumotlarni oldindan yuklaydi
+            cart_to_serialize = Cart.objects.select_related(
+                'user'  # Foydalanuvchi ma'lumotini ham birga olish uchun
+            ).prefetch_related(
+                'items',  # Barcha CartItem'lar
+                'items__product',  # Ularning Product'lari
+                'items__product__translations',  # Product tarjimalari
+                'items__product__category',  # Product kategoriyalari
+                'items__product__category__translations'  # Kategoriya tarjimalari
+            ).get(pk=cart.pk)  # pk orqali aynan shu savatni olamiz
+
+        except Cart.DoesNotExist:  # get_or_create dan keyin bu bo'lmasligi kerak, lekin ehtiyot shart
+            logger.error(f"Cart somehow not found or created for user {user.pk}")
+            return Response({"error": "Savat topilmadi."}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            # Boshqa kutilmagan xatoliklar
+            logger.error(f"Error getting/creating/prefetching cart for user {user.pk}: {e}", exc_info=True)
+            return Response({"error": "Savatni olishda xatolik."}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+        # Optimallashtirilgan savatni serializerga beramiz
+        serializer = CartSerializer(cart_to_serialize, context={'request': request})
         return Response(serializer.data)
 
     # --- POST Method: Savatga mahsulot qo'shish ---
@@ -306,48 +334,73 @@ class CartView(APIView):
         return Response(serializer.data, status=status.HTTP_200_OK)
 
     # --- PATCH Method: Savatdagi mahsulot sonini o'zgartirish ---
+    @transaction.atomic
     def patch(self, request):
+        item_id = request.data.get('item_id')
+        change = request.data.get('change')  # Yangi miqdor o'rniga o'zgarish (+1 yoki -1)
+
+        if not item_id or change is None:
+            return Response({"error": "item_id va change maydonlari majburiy."}, status=status.HTTP_400_BAD_REQUEST)
+
         cart = self.get_or_create_cart(request.user)
-        item_id = request.data.get('item_id')  # CartItem ID si
-        quantity = request.data.get('quantity')
-
-        if not item_id or quantity is None:
-            return Response({"error": "item_id va quantity maydonlari majburiy."}, status=status.HTTP_400_BAD_REQUEST)
-
-        try:
-            quantity = int(quantity)
-            if quantity <= 0:
-                # Agar son 0 yoki manfiy bo'lsa, o'chirish kerak (DELETE ga qarang)
-                # Yoki xatolik qaytarish mumkin:
-                raise ValueError("Miqdor musbat bo'lishi kerak. O'chirish uchun DELETE ishlating.")
-        except (TypeError, ValueError):
-            return Response({"error": "quantity musbat butun son bo'lishi kerak."}, status=status.HTTP_400_BAD_REQUEST)
-
-        # CartItem'ni topamiz va u shu foydalanuvchining savatiga tegishli ekanligini tekshiramiz
         cart_item = get_object_or_404(CartItem, pk=item_id, cart=cart)
+        new_quantity = cart_item.quantity + change
 
-        cart_item.quantity = quantity
-        cart_item.save()
+        if new_quantity < 1:
+            cart_item.delete()
+            logger.info(f"CartItem {item_id} deleted via PATCH.")
+        else:
+            cart_item.quantity = new_quantity
+            cart_item.save(update_fields=['quantity'])
+            logger.info(f"CartItem {item_id} quantity updated to {new_quantity}.")
 
-        serializer = CartSerializer(cart, context={'request': request})
-        return Response(serializer.data)
+        # --- JAVOB QAYTARISHDAN OLDIN OPTIMALLASHTIRISH ---
+        # Savatning yangilangan holatini optimallashtirilgan so'rov bilan olamiz
+        try:
+            cart_to_serialize = Cart.objects.select_related(  # ForeignKey uchun
+                'user'
+            ).prefetch_related(  # ManyToMany yoki teskari ForeignKey uchun
+                'items',  # Savatdagi itemlar
+                'items__product',  # Har bir item uchun mahsulot
+                'items__product__translations',  # Mahsulot tarjimalari
+                'items__product__category',  # Mahsulot kategoriyasi
+                'items__product__category__translations'  # Kategoriya tarjimalari
+            ).get(pk=cart.pk)  # Aynan shu savatni olamiz
+        except Cart.DoesNotExist:  # Agar savat qandaydir tarzda o'chib ketgan bo'lsa
+            return Response({"error": "Savat topilmadi."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CartSerializer(cart_to_serialize, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
     # --- DELETE Method: Savatdagi mahsulotni o'chirish ---
+    @transaction.atomic
     def delete(self, request):
-        cart = self.get_or_create_cart(request.user)
-        item_id = request.data.get('item_id')  # CartItem ID si
+        item_id = request.data.get('item_id')
 
         if not item_id:
             return Response({"error": "item_id maydoni majburiy."}, status=status.HTTP_400_BAD_REQUEST)
 
-        # CartItem'ni topamiz va u shu foydalanuvchining savatiga tegishli ekanligini tekshiramiz
+        user = request.user
+        cart = self.get_or_create_cart(user)
         cart_item = get_object_or_404(CartItem, pk=item_id, cart=cart)
-
+        item_pk_for_log = cart_item.pk
         cart_item.delete()
+        logger.info(f"CartItem {item_pk_for_log} deleted by user {user.id}.")
 
-        # O'chirilgandan keyin yangilangan savatni qaytaramiz
-        serializer = CartSerializer(cart, context={'request': request})
-        return Response(serializer.data, status=status.HTTP_200_OK)  # Yoki 204 No Content
+        # --- JAVOB QAYTARISHDAN OLDIN OPTIMALLASHTIRISH ---
+        try:
+            cart_to_serialize = Cart.objects.select_related(
+                'user'
+            ).prefetch_related(
+                'items',
+                'items__product__translations',
+                'items__product__category__translations'
+            ).get(pk=cart.pk)
+        except Cart.DoesNotExist:
+            return Response({"error": "Savat topilmadi (o'chirishdan keyin)."}, status=status.HTTP_404_NOT_FOUND)
+
+        serializer = CartSerializer(cart_to_serialize, context={'request': request})
+        return Response(serializer.data, status=status.HTTP_200_OK)
 
 
 class CheckoutView(APIView):

@@ -15,11 +15,23 @@ Including another URLconf
     2. Add a URL to urlpatterns:  path('blog/', include('blog.urls'))
 """
 # backend_config/urls.py
+from django.conf import settings
 from django.contrib import admin
 from django.urls import path, include
 
 urlpatterns = [
     path('admin/', admin.site.urls),
     # API ilovasining URL'larini /api/v1/ prefiksi bilan qo'shamiz
-    path('api/v1/', include('api.urls')), # <-- Shu qatorni qo'shing
+    path('api/v1/', include('api.urls')),  # <-- Shu qatorni qo'shing
 ]
+
+# --- DEBUG TOOLBAR URL'LARINI QO'SHISH ---
+if settings.DEBUG:
+    try:
+        import debug_toolbar
+
+        urlpatterns = [
+                          path('__debug__/', include(debug_toolbar.urls)),
+                      ] + urlpatterns
+    except ImportError:
+        pass

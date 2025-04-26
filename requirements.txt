@@ -7,3 +7,5 @@ python-dotenv>=0.20,<1.2 # .env faylidan sozlamalarni o'qish uchun
 django-parler>=2.3,<2.4
 django_cors_headers
 python-telegram-bot[httpx]>=20.0,<21.0
+requests==2.32.3
+django-debug-toolbar>=3.8,<4.4
