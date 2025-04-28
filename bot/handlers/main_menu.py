@@ -2,6 +2,8 @@
 import logging
 from telegram import Update
 from telegram.ext import ContextTypes
+
+from .order import show_order_history
 from ..config import MAIN_MENU
 from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request  # API client kerak
@@ -27,8 +29,6 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await show_category_list(update, context)  # Kategoriyalarni ko'rsatish funksiyasini chaqiramiz
         return next_state  # Xabar show_category_list ichida yuboriladi
 
-
-
     elif message_text in ["🛒 Savat", "🛒 Корзина"]:
 
         loading_text = "Savat yuklanmoqda..." if lang_code == 'uz' else "Загрузка корзины..."
@@ -52,10 +52,20 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
             reply_text = f"Savatni olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить корзину: {error_detail}"
 
             await update.message.reply_text(reply_text)
+
     elif message_text in ["📋 Buyurtmalarim", "📋 Мои заказы"]:
-        reply_text = "Buyurtmalar tarixi..." if lang_code == 'uz' else "История заказов..."
-        # TODO: Implement show_order_history function call here (from .orders)
-        pass  # Hozircha placeholder
+        loading_text = "Buyurtmalar tarixi yuklanmoqda..." if lang_code == 'uz' else "Загрузка истории заказов..."
+        await update.message.reply_text(loading_text)
+        history_response = await make_api_request(context, 'GET', 'orders/history/', user_id)
+        if history_response and not history_response.get('error'):
+            await show_order_history(update, context, history_response)  # <-- Yangi funksiyani chaqiramiz
+        elif history_response and history_response.get('status_code') == 401:
+            pass  # Xatolik make_api_request ichida hal qilinadi
+        else:
+            error_detail = history_response.get('detail', 'N/A') if history_response else 'N/A'
+            reply_text = f"Buyurtmalar tarixini olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить историю заказов: {error_detail}"
+            await update.message.reply_text(reply_text)
+        return next_state  # MAIN_MENU da qolamiz
     elif message_text in ["📍 Filiallar", "📍 Филиалы"]:
         reply_text = "Filiallar ro'yxati..." if lang_code == 'uz' else "Список филиалов..."
         # TODO: Implement show_branch_list function call here (from ??? maybe common or menu_browse?)

@@ -1,5 +1,4 @@
 import logging
-import asyncio
 
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -7,18 +6,22 @@ from telegram.ext import (
 )
 
 # Loyihamizning modullaridan import qilamiz
-from .config import BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU
+from .config import (
+    BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
+    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES
+)
 from .handlers.common import cancel
 from .handlers.start_auth import (
     start, set_language_callback, start_registration_callback,
     contact_handler, otp_handler
 )
+from .handlers.order import handle_delivery_type_selection, handle_branch_selection, handle_location
 from .handlers.main_menu import main_menu_dispatch
 from .handlers.callbacks import (
     category_selected_callback, product_selected_callback,
     add_to_cart_callback, quantity_noop_callback, back_button_callback,
     start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
-    cart_info_noop_callback, cart_refresh_callback
+    cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback
 )
 from .utils.api_client import close_api_client  # Klientni yopish uchun
 
@@ -52,8 +55,33 @@ def main() -> None:
             WAITING_PHONE: [MessageHandler(filters.CONTACT & ~filters.COMMAND, contact_handler)],
             WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d{4,6}$'), otp_handler)],
             MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_dispatch)],
+
+            # --- CHECKOUT HOLATLARI ---
+            ASKING_DELIVERY_TYPE: [
+                CallbackQueryHandler(handle_delivery_type_selection, pattern='^checkout_set_'),
+                # Bu holatda ham cancel ishlashi uchun fallback ga qo'shamiz yoki shu yerga
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_BRANCH: [  # Filial tanlashni kutish holati
+                CallbackQueryHandler(handle_branch_selection, pattern='^checkout_branch_'),
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')  # Bu yerda ham cancel
+            ],
+            ASKING_LOCATION: [  # Lokatsiya yuborishni kutish holati
+                MessageHandler(filters.LOCATION & ~filters.COMMAND, handle_location),
+                # Agar lokatsiya o'rniga boshqa narsa yuborsa?
+                MessageHandler(filters.ALL & ~filters.COMMAND,
+                               lambda u, c: u.message.reply_text("Iltimos, lokatsiya yuboring yoki /cancel bosing.")),
+            ],
+            # ASKING_PAYMENT: [], # Keyingi qadamlar uchun
+            # ASKING_NOTES: [],  # Keyingi qadamlar uchun
+            # ----------------------------
         },
-        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        fallbacks=[
+            CommandHandler("cancel", cancel),  # Umumiy cancel
+            # Checkout cancel ni alohida ushlash ham mumkin, yuqorida qo'shdik
+            # CallbackQueryHandler(cancel, pattern='^checkout_cancel$'),
+            CommandHandler("start", start)  # Boshiga qaytish
+        ],
         name="main_conversation",
         persistent=True,
     )
@@ -71,6 +99,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cart_item_delete_callback, pattern='^cart_del_'))
     application.add_handler(CallbackQueryHandler(cart_info_noop_callback, pattern='^cart_info_'))
     application.add_handler(CallbackQueryHandler(cart_refresh_callback, pattern='^cart_refresh$'))
+    application.add_handler(CallbackQueryHandler(order_detail_callback, pattern='^order_'))
+    application.add_handler(CallbackQueryHandler(history_page_callback, pattern='^hist_page_'))
 
     # Botni ishga tushirish
     logger.info("Starting bot...")

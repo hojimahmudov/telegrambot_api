@@ -1,15 +1,19 @@
 # bot/handlers/callbacks.py
 import logging
+from urllib.parse import urlparse, parse_qs
+
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from .cart import show_cart
+from .order import show_order_history
 
 # Loyihadagi boshqa modullardan importlar
 from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request
 # Menyuni ko'rsatish funksiyalarini import qilamiz
 from .menu_browse import show_category_list, show_product_list
+from ..config import ASKING_DELIVERY_TYPE
 
 logger = logging.getLogger(__name__)
 
@@ -325,15 +329,103 @@ async def back_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
 
 
 # Checkout boshlash callback'i (placeholder)
-async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:  # Endi state qaytaradi
+    """ "Rasmiylashtirish" tugmasi bosilganda ishlaydi va checkout suhbatini boshlaydi."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
     logger.info(f"User {user_id} initiated checkout.")
-    reply_text = "Checkout boshlanmoqda..." if lang_code == 'uz' else "Начинаем оформление заказа..."
-    # TODO: Start checkout conversation handler here
+
+    # Yetkazib berish turini tanlash tugmalarini yaratamiz
+    del_type_text = "Yetkazib berish" if lang_code == 'uz' else "Доставка"
+    pickup_type_text = "Olib ketish" if lang_code == 'uz' else "Самовывоз"
+    cancel_text = "Bekor qilish" if lang_code == 'uz' else "Отмена"
+
+    keyboard = [
+        [
+            InlineKeyboardButton(del_type_text, callback_data="checkout_set_delivery"),
+            InlineKeyboardButton(pickup_type_text, callback_data="checkout_set_pickup")
+        ],
+        [InlineKeyboardButton(f"❌ {cancel_text}", callback_data="checkout_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    message_text = "Yetkazib berish turini tanlang:" if lang_code == 'uz' else "Выберите тип доставки:"
+
+    # Oldingi savat xabarini tahrirlaymiz
     try:
-        await query.edit_message_text(text=reply_text)
+        await query.edit_message_text(
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML  # Agar formatlash bo'lsa
+        )
     except Exception as e:
-        logger.warning(f"Could not edit checkout start message: {e}")
+        logger.error(f"Error editing message to start checkout: {e}")
+        # Agar tahrirlab bo'lmasa, yangi xabar yuboramiz
+        await context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup)
+    logger.info(f"Transitioning to state: {ASKING_DELIVERY_TYPE}")
+    print(f"DEBUG: Returning state type: {type(ASKING_DELIVERY_TYPE)}, value: {repr(ASKING_DELIVERY_TYPE)}")
+    # Keyingi holatni qaytaramiz
+    return ASKING_DELIVERY_TYPE  # Yetkazib berish turini kutish holati
+
+
+async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Batafsil" (order_{id}) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+    try:
+        order_id = int(query.data.split('_')[1])
+        logger.info(f"User {user_id} requested details for order {order_id}")
+        # TODO: Call GET /orders/{order_id}/ API
+        # TODO: Create show_order_detail(update, context, order_data) function in order.py
+        # TODO: Call show_order_detail to display info
+        await query.edit_message_text(f"Buyurtma #{order_id} detallari hali ko'rsatilmaydi.")
+    except (IndexError, ValueError, TypeError):
+        logger.warning(f"Invalid order detail callback: {query.data}")
+        await query.edit_message_text("Xatolik.")
+
+
+async def history_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Buyurtmalar tarixi sahifalash tugmalari bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+    callback_data = query.data  # 'hist_page_{page_num}' yoki 'hist_page_url_{url}'
+
+    logger.info(f"User {user_id} requested history page: {callback_data}")
+
+    endpoint = 'orders/history/'  # Standart endpoint
+    params = {}
+    if callback_data.startswith('hist_page_url_'):
+        # Agar to'liq URL bo'lsa, undan faqat path va query qismini olish kerak
+        # Bu xavfliroq, yaxshisi page raqamini ishlatish
+        full_url = callback_data[len('hist_page_url_'):]
+        parsed_url = urlparse(full_url)
+        endpoint = parsed_url.path.replace('/api/v1/', '', 1)  # API base URL ni olib tashlash
+        params = parse_qs(parsed_url.query)  # Query parametrlarni dict ga o'giradi
+        # parse_qs list qaytaradi: {'page': ['2']} -> {'page': '2'} qilish kerak
+        params = {k: v[0] for k, v in params.items() if len(v) == 1}
+
+    elif callback_data.startswith('hist_page_'):
+        try:
+            page_num = int(callback_data.split('_')[-1])
+            params = {'page': page_num}
+        except (ValueError, IndexError):
+            logger.warning(f"Invalid history page callback data: {callback_data}")
+            await query.edit_message_text("Xatolik: Sahifa topilmadi.")
+            return
+
+    # API ga yangi sahifa uchun so'rov yuboramiz
+    history_response = await make_api_request(context, 'GET', endpoint, user_id, params=params)
+
+    if history_response and not history_response.get('error'):
+        await show_order_history(update, context, history_response)  # Xabarni yangilaymiz
+    elif history_response and history_response.get('status_code') == 404:
+        await query.answer("Bu sahifa mavjud emas.", show_alert=True)
+    else:
+        error_detail = history_response.get('detail', 'N/A') if history_response else 'N/A'
+        await query.answer(f"Sahifani yuklashda xatolik: {error_detail[:100]}", show_alert=True)
