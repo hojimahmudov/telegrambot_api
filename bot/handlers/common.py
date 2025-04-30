@@ -9,6 +9,18 @@ from ..utils.helpers import get_user_lang
 logger = logging.getLogger(__name__)
 
 
+async def debug_callback_in_state_5(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ASKING_DELIVERY_TYPE holatida HAR QANDAY callback queryni ushlaydi."""
+    query = update.callback_query
+    user_id = query.from_user.id if query.from_user else "Unknown"
+    # Xabarni WARNING darajasida chiqaramiz, yaqqol ko'rinishi uchun
+    logger.warning(
+        f"DEBUG: Callback received in ASKING_DELIVERY_TYPE state! "
+        f"Data: '{query.data}', Handler Pattern: '.*'. "
+        f"Expected handler for '^checkout_set_' did NOT run."
+    )
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Joriy suhbatni bekor qiladi."""
     user = update.effective_user

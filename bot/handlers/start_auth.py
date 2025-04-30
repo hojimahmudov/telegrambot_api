@@ -7,7 +7,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 # Loyihadagi boshqa modullardan importlar
-from ..config import SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU
+from ..config import SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU, ASKING_DELIVERY_TYPE
 from ..keyboards import get_language_keyboard, get_registration_keyboard, get_phone_keyboard, get_main_menu_markup
 from ..utils.helpers import get_user_lang, get_user_token_data, store_user_token_data, clear_user_token_data
 from ..utils.api_client import make_api_request, update_language_in_db
@@ -28,20 +28,46 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
 
 
 # Til tanlash callback'i
-async def set_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+async def set_language_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:  # Holat qaytaradi
+    """Til tanlash tugmasi bosilganda ishlaydi."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
-    lang_code = query.data.split('_')[-1]
+
+    lang_code = query.data.split('_')[-1]  # 'set_lang_uz' -> 'uz'
     context.user_data['language_code'] = lang_code
     logger.info(f"User {user_id} selected language: {lang_code}")
+
     confirmation_text = "Til tanlandi!" if lang_code == 'uz' else "Язык выбран!"
     try:
+        # Avvalgi xabarni tahrirlaymiz (faqat matnni)
         await query.edit_message_text(text=confirmation_text)
     except Exception as e:
         logger.warning(f"Could not edit language selection message: {e}")
-        await context.bot.send_message(chat_id=user_id, text=confirmation_text)
-    return await check_auth_and_proceed(update, context)  # Keyingi tekshiruvga o'tadi
+        # Agar tahrirlab bo'lmasa, yangi tasdiq xabari yuborish shart emas,
+        # chunki darhol keyingi savolni yuboramiz.
+
+    # --- TO'G'RIDAN-TO'G'RI YETKAZIB BERISH TURINI SO'RAYMIZ (DEBUG UCHUN) ---
+    delivery_type_text = "Yetkazib berish turini tanlang (DEBUG):" if lang_code == 'uz' else "Выберите тип доставки (DEBUG):"
+    del_type_text = "Yetkazib berish" if lang_code == 'uz' else "Доставка"
+    pickup_type_text = "Olib ketish" if lang_code == 'uz' else "Самовывоз"
+    cancel_text = "Bekor qilish" if lang_code == 'uz' else "Отмена"
+    keyboard = [
+        [
+            InlineKeyboardButton(del_type_text, callback_data="checkout_set_delivery"),
+            InlineKeyboardButton(pickup_type_text, callback_data="checkout_set_pickup")
+        ],
+        [InlineKeyboardButton(f"❌ {cancel_text}", callback_data="checkout_cancel")]
+        # Cancel callbackni ConversationHandler fallbacks ushlaydi
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    # Yangi xabar yuboramiz (yoki edit qilingan xabarga reply?)
+    await context.bot.send_message(chat_id=user_id, text=delivery_type_text, reply_markup=reply_markup)
+    # ------------------------------------------------------------------------
+
+    # KEYINGI HOLATNI QAYTARAMIZ
+    logger.info(f"Transitioning to state: {ASKING_DELIVERY_TYPE}")  # Bu log endi shu yerda
+    return ASKING_DELIVERY_TYPE  # Yetkazib berish turini kutish holati (qiymati 5)
 
 
 # Autentifikatsiyani tekshirish va davom etish
