@@ -84,39 +84,39 @@ async def show_branch_selection(update: Update, context: ContextTypes.DEFAULT_TY
 # --- YETKAZIB BERISH TURI TANLOVINI ISHLAYDIGAN HANDLER ---
 async def handle_delivery_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Yetkazib berish yoki Olib ketish tanlovini boshqaradi."""
+    # --- BU FUNKSIYANING BOSHLANISHIGA LOG QO'SHISHNI UNUTMANG (DEBUG UCHUN) ---
     logger.info("handle_delivery_type_selection triggered!")
+    # ----------------------------------------------------------------------
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
-    selection = query.data  # Masalan, "checkout_set_delivery" yoki "checkout_set_pickup"
+    selection = query.data
 
     if selection == "checkout_set_delivery":
         logger.info(f"User {user_id} selected delivery.")
         context.user_data['checkout_delivery_type'] = 'delivery'
-
-        # Lokatsiya so'rash
         keyboard = [[KeyboardButton("📍 Lokatsiya yuborish", request_location=True)]]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
         message_text = "Yetkazib berish manzilini lokatsiya tugmasi orqali yuboring:" if lang_code == 'uz' else "Отправьте адрес доставки с помощью кнопки геолокации:"
-
-        # Avvalgi inline tugmalarni olib tashlab, matnni yangilaymiz
-        await query.edit_message_text(text=message_text)
-        # ReplyKeyboardni chiqarish uchun yordamchi xabar
+        # Oldingi xabarni tahrirlaymiz
+        try:
+            await query.edit_message_text(text=message_text)
+        except Exception as e:
+            logger.warning(f"Could not edit msg for location request: {e}")
+            await context.bot.send_message(chat_id=user_id, text=message_text)
+        # Reply tugmasini alohida yuboramiz
         await context.bot.send_message(chat_id=user_id, text="👇", reply_markup=reply_markup)
-
-        return ASKING_LOCATION  # Lokatsiya kutish holatiga o'tamiz
+        return ASKING_LOCATION
 
     elif selection == "checkout_set_pickup":
         logger.info(f"User {user_id} selected pickup.")
         context.user_data['checkout_delivery_type'] = 'pickup'
+        await show_branch_selection(update, context)  # Filiallarni ko'rsatish
+        return ASKING_BRANCH
 
-        # Filial tanlashni ko'rsatamiz (yuqoridagi yordamchi funksiya)
-        await show_branch_selection(update, context)
-        return ASKING_BRANCH  # Filial tanlashni kutish holatiga o'tamiz
-
-    else:  # Kutilmagan callback data
-        logger.warning(f"Unexpected callback data in delivery type selection: {selection}")
+    else:
+        logger.warning(f"Unexpected callback data: {selection}")
         return ASKING_DELIVERY_TYPE  # Joriy holatda qolamiz
 
 
@@ -146,21 +146,50 @@ async def handle_branch_selection(update: Update, context: ContextTypes.DEFAULT_
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """Foydalanuvchi lokatsiya yuborganda ishlaydi."""
+    message = update.message  # Lokatsiya xabar sifatida keladi
+    location = message.location
     user = update.effective_user
     user_id = user.id
-    location = update.message.location
     lang_code = get_user_lang(context)
-    logger.info(f"User {user_id} sent location: Lat {location.latitude}, Lon {location.longitude}")
 
-    # Lokatsiyani kontekstga saqlaymiz
-    context.user_data['checkout_latitude'] = location.latitude
-    context.user_data['checkout_longitude'] = location.longitude
+    if location:
+        lat = location.latitude
+        lon = location.longitude
+        logger.info(f"User {user_id} sent location: Lat {lat}, Lon {lon}")
 
-    # ReplyKeyboardni olib tashlaymiz va keyingi qadamni so'raymiz
-    reply_text = "Lokatsiya qabul qilindi. Endi to'lov turini tanlang..."  # Placeholder
-    await update.message.reply_text(text=reply_text, reply_markup=ReplyKeyboardRemove())  # Hozircha tugmalarsiz
+        # Lokatsiyani keyinchalik checkoutda ishlatish uchun kontekstga saqlaymiz
+        context.user_data['checkout_latitude'] = lat
+        context.user_data['checkout_longitude'] = lon
 
-    return ASKING_PAYMENT  # To'lov turini kutish holatiga o'tamiz
+        # To'lov turini so'raymiz
+        payment_prompt = "To'lov turini tanlang:" if lang_code == 'uz' else "Выберите способ оплаты:"
+        cash_text = "💵 Naqd" if lang_code == 'uz' else "💵 Наличные"
+        card_text = "💳 Karta" if lang_code == 'uz' else "💳 Картой"
+        cancel_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отмена"
+
+        keyboard = [
+            [
+                InlineKeyboardButton(cash_text, callback_data="checkout_payment_cash"),
+                InlineKeyboardButton(card_text, callback_data="checkout_payment_card")
+            ],
+            [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
+            # ConversationHandler'dagi fallback ushlaydi
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Yangi xabar yuboramiz (bu ReplyKeyboardni ham olib tashlaydi)
+        await message.reply_text(
+            text=payment_prompt,
+            reply_markup=reply_markup  # Inline tugmalar bilan
+        )
+
+        return ASKING_PAYMENT  # To'lov turini kutish holatiga o'tamiz
+    else:
+        # Agar lokatsiya kelmasa (filtr bo'lsa ham, ehtimoldan xoli emas)
+        logger.warning(f"Location handler triggered for user {user_id} but no location found in message.")
+        await message.reply_text(
+            "Lokatsiya qabul qilishda xatolik. Qaytadan yuboring yoki /cancel bosing." if lang_code == 'uz' else "Ошибка при получении локации. Отправьте снова или нажмите /cancel.")
+        return ASKING_LOCATION  # Shu holatda qolamiz
 
 
 # --- BUYURTMALAR TARIXI VA DETALLARI UCHUN FUNKSIYALAR ---

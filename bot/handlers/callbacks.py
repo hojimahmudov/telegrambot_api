@@ -365,7 +365,6 @@ async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_
         # Agar tahrirlab bo'lmasa, yangi xabar yuboramiz
         await context.bot.send_message(chat_id=user_id, text=message_text, reply_markup=reply_markup)
     logger.info(f"Transitioning to state: {ASKING_DELIVERY_TYPE}")
-    print(f"DEBUG: Returning state type: {type(ASKING_DELIVERY_TYPE)}, value: {repr(ASKING_DELIVERY_TYPE)}")
     # Keyingi holatni qaytaramiz
     return ASKING_DELIVERY_TYPE  # Yetkazib berish turini kutish holati
 
