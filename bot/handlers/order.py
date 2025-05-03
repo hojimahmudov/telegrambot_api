@@ -3,13 +3,16 @@ import logging
 import datetime  # <-- Sanani formatlash uchun (agar show_order_history'dan ko'chirsak)
 from urllib.parse import urlparse, parse_qs  # <-- URL parse uchun (agar show_order_history'dan ko'chirsak)
 
+from django.utils import timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, KeyboardButton, \
     ReplyKeyboardRemove
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 # Loyihadagi boshqa modullardan importlar
-from ..config import ASKING_BRANCH, ASKING_LOCATION, MAIN_MENU, ASKING_DELIVERY_TYPE, ASKING_PAYMENT  # Kerakli holatlar
+from ..config import ASKING_BRANCH, ASKING_LOCATION, MAIN_MENU, ASKING_DELIVERY_TYPE, ASKING_PAYMENT, \
+    ASKING_NOTES  # Kerakli holatlar
+from ..keyboards import get_main_menu_markup
 from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request
 
@@ -128,20 +131,236 @@ async def handle_branch_selection(update: Update, context: ContextTypes.DEFAULT_
     lang_code = get_user_lang(context)
 
     try:
+        # Callback datadan filial ID sini olamiz
+        if not query.data or not query.data.startswith('checkout_branch_'): raise ValueError("Invalid callback")
         branch_id = int(query.data.split('_')[-1])
         logger.info(f"User {user_id} selected branch ID: {branch_id}")
+
         # Tanlangan filial ID sini kontekstga saqlaymiz
         context.user_data['checkout_pickup_branch_id'] = branch_id
 
-        # TODO: Keyingi qadamni so'rash (masalan, to'lov turi)
-        reply_text = f"Filial #{branch_id} tanlandi. Endi to'lov turini tanlang..."  # Placeholder
-        await query.edit_message_text(text=reply_text)  # Hozircha tugmalarsiz
+        # --- Endi To'lov turini so'raymiz ---
+        payment_prompt = "To'lov turini tanlang:" if lang_code == 'uz' else "Выберите способ оплаты:"
+        cash_text = "💵 Naqd" if lang_code == 'uz' else "💵 Наличные"
+        card_text = "💳 Karta" if lang_code == 'uz' else "💳 Картой"
+        cancel_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отмена"
+
+        keyboard = [
+            [
+                InlineKeyboardButton(cash_text, callback_data="checkout_payment_cash"),
+                InlineKeyboardButton(card_text, callback_data="checkout_payment_card")
+            ],
+            [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Oldingi xabarni tahrirlab, yangi savolni va tugmalarni chiqaramiz
+        await query.edit_message_text(
+            text=payment_prompt,
+            reply_markup=reply_markup
+        )
+        # -------------------------------------
+
         return ASKING_PAYMENT  # To'lov turini kutish holatiga o'tamiz
 
-    except (IndexError, ValueError, TypeError):
-        logger.warning(f"Invalid branch selection callback: {query.data}")
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid branch selection callback: {query.data} - {e}")
         await query.edit_message_text("Xatolik: Filial tanlashda muammo.")
+        # Qaysi holatga qaytish kerak? Avvalgi holatga qaytish qiyin bo'lishi mumkin
+        # Yaxshisi suhbatni tugatish yoki ASKING_BRANCH da qolish
         return ASKING_BRANCH  # Shu holatda qolamiz
+
+
+# --- YANGI: To'lov Turini Tanlashni Boshqaradigan Handler ---
+async def handle_payment_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """To'lov turi tugmasi ('checkout_payment_{type}') bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    try:
+        # Callback datadan to'lov turini olamiz
+        if not query.data or not query.data.startswith('checkout_payment_'): raise ValueError("Invalid callback")
+        payment_type = query.data.split('_')[-1]  # 'cash' yoki 'card'
+        if payment_type not in ['cash', 'card']: raise ValueError("Invalid payment type")
+
+        logger.info(f"User {user_id} selected payment type: {payment_type}")
+        # Tanlangan to'lov turini kontekstga saqlaymiz
+        context.user_data['checkout_payment_type'] = payment_type
+
+        # --- Endi Izoh qoldirishni so'raymiz ---
+        notes_prompt = "Buyurtmaga qo'shimcha izohingiz bormi? (Ixtiyoriy)\n\nYozmasangiz pastdagi tugmani bosing." \
+            if lang_code == 'uz' else \
+            "Есть ли у вас дополнительные комментарии к заказу? (Необязательно)\n\nНажмите кнопку ниже, если нет."
+        skip_text = "➡️ Keyingisi / Izohsiz" if lang_code == 'uz' else "➡️ Далее / Без комментария"
+        keyboard = [[InlineKeyboardButton(skip_text, callback_data="checkout_skip_notes")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        # Oldingi xabarni tahrirlaymiz
+        await query.edit_message_text(
+            text=notes_prompt,
+            reply_markup=reply_markup
+        )
+        # --------------------------------------
+
+        return ASKING_NOTES  # Izoh kutish holatiga o'tamiz
+
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid payment selection callback: {query.data} - {e}")
+        await query.edit_message_text("Xatolik: To'lov turini tanlashda muammo.")
+        return ASKING_PAYMENT  # Shu holatda qolamiz
+
+
+# --- YANGI: Yakuniy Checkout Uchun Yordamchi Funksiya ---
+async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Ma'lumotlarni yig'adi, checkout API ni chaqiradi, natijani yuboradi, suhbatni tugatadi."""
+    query = update.callback_query
+    message = update.message
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+    message_to_edit_id = query.message.message_id if query and query.message else None
+
+    processing_text = "Buyurtma rasmiylashtirilmoqda..." if lang_code == 'uz' else "Обработка заказа..."
+    if message_to_edit_id:
+        try:
+            await context.bot.edit_message_text(text=processing_text, chat_id=chat_id, message_id=message_to_edit_id)
+        except Exception as e:
+            logger.warning(f"Could not edit 'processing' msg: {e}")  # Ignore edit error
+    elif message:
+        await message.reply_text(processing_text)  # Send new if from text message
+    else:  # Should have either query or message
+        await context.bot.send_message(chat_id=chat_id, text=processing_text)
+
+    # --- Checkout ma'lumotlarini SHARTLI RAVISHDA yig'amiz ---
+    delivery_type = context.user_data.get("checkout_delivery_type")
+    payment_type = context.user_data.get("checkout_payment_type")
+    notes = context.user_data.get("checkout_notes", "")
+
+    # Umumiy kerakli ma'lumotlar mavjudligini tekshiramiz
+    if not delivery_type or not payment_type:
+        logger.error(f"Missing critical checkout data (type or payment) for user {user_id}")
+        error_text = "Xatolik: Buyurtma ma'lumotlari to'liq emas. /start bosing."  # ...
+        await context.bot.send_message(chat_id=chat_id, text=error_text)
+        # Kontekstni tozalash
+        keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
+                         'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
+        for key in keys_to_clear:
+            if key in context.user_data: del context.user_data[key]
+        return ConversationHandler.END
+
+    # API uchun payloadni boshlang'ich holatga keltiramiz
+    checkout_data = {
+        "delivery_type": delivery_type,
+        "payment_type": payment_type,
+        "notes": notes,
+    }
+
+    # Yetkazib berish turiga qarab qo'shimcha ma'lumotlarni qo'shamiz
+    if delivery_type == 'delivery':
+        latitude = context.user_data.get("checkout_latitude")
+        longitude = context.user_data.get("checkout_longitude")
+        address = context.user_data.get("checkout_address")  # Optional
+        if latitude is None or longitude is None:
+            logger.error(f"Missing location for delivery checkout for user {user_id}")
+            error_text = "Xatolik: Yetkazib berish uchun lokatsiya topilmadi. /start bosing."  # ...
+            await context.bot.send_message(chat_id=chat_id, text=error_text)
+            keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
+                             'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
+            for key in keys_to_clear:
+                if key in context.user_data: del context.user_data[key]
+            return ConversationHandler.END
+        checkout_data['latitude'] = latitude
+        checkout_data['longitude'] = longitude
+        if address: checkout_data['address'] = address  # Faqat mavjud bo'lsa qo'shamiz
+    elif delivery_type == 'pickup':
+        branch_id = context.user_data.get("checkout_pickup_branch_id")
+        if not branch_id:
+            logger.error(f"Missing branch_id for pickup checkout for user {user_id}")
+            error_text = "Xatolik: Olib ketish uchun filial topilmadi. /start bosing."  # ...
+            await context.bot.send_message(chat_id=chat_id, text=error_text)
+            keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
+                             'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
+            for key in keys_to_clear:
+                if key in context.user_data: del context.user_data[key]
+            return ConversationHandler.END
+        checkout_data['pickup_branch_id'] = branch_id
+    # ---------------------------------------------------------
+
+    logger.info(f"Final checkout data for user {user_id}: {checkout_data}")
+
+    # API ga so'rov yuboramiz
+    api_response = await make_api_request(context, 'POST', 'orders/checkout/', user_id, data=checkout_data)
+
+    final_message = ""
+    final_markup = get_main_menu_markup(context)
+
+    if api_response and api_response.get('status_code') == 201 and not api_response.get('error'):
+        # ... (Muvaffaqiyatli javobni formatlash - avvalgidek) ...
+        order_id = api_response.get('id')
+        # ... (qolgan qismi #195 da) ...
+        final_message = f"✅ Buyurtmangiz <b>#{order_id}</b> muvaffaqiyatli rasmiylashtirildi!\n"  # ... (vaqtlar bilan)
+
+    else:  # API Xatoligi
+        # ... (API xatoligini formatlash - avvalgidek) ...
+        error_detail = api_response.get('detail',
+                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
+        # ... (log yozish) ...
+        final_message = f"❌ Buyurtmani rasmiylashtirishda xatolik: {str(error_detail)[:100]}"  # ...
+
+    # Yakuniy xabarni yuboramiz
+    # Avvalgi processing xabarni o'chirish yaxshiroq bo'lishi mumkin
+    if message_to_edit_id:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_to_edit_id)
+        except:
+            pass
+    await context.bot.send_message(chat_id=chat_id, text=final_message, reply_markup=final_markup,
+                                   parse_mode=ParseMode.HTML)
+
+    # Checkout kontekstini tozalaymiz
+    keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude', 'checkout_longitude',
+                     'checkout_payment_type', 'checkout_notes', 'checkout_address']
+    for key in keys_to_clear:
+        if key in context.user_data:
+            try:
+                del context.user_data[key]
+            except KeyError:
+                pass
+
+    return ConversationHandler.END
+
+
+# --- YANGI: Izoh Kiritish Uchun Handler ---
+async def handle_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Foydalanuvchi izoh yozganda ishlaydi."""
+    user = update.effective_user
+    user_id = user.id
+    note_text = update.message.text
+    lang_code = get_user_lang(context)
+    logger.info(f"User {user_id} entered note: {note_text[:50]}...")
+
+    # Izohni saqlaymiz
+    context.user_data['checkout_notes'] = note_text
+
+    # Checkoutni yakunlaymiz
+    return await finalize_checkout(update, context)
+
+
+# --- YANGI: Izohni O'tkazib Yuborish Uchun Callback Handler ---
+async def skip_notes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """ "Keyingisi / Izohsiz" tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    logger.info(f"User {user_id} skipped notes.")
+
+    # Izoh maydonini bo'sh qoldiramiz
+    context.user_data['checkout_notes'] = ""
+
+    # Checkoutni yakunlaymiz
+    return await finalize_checkout(update, context)
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:

@@ -1,28 +1,30 @@
 # bot/bot.py (MINIMAL TEST KODI)
 import logging
-import os
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+
 from telegram.ext import (
-    Application, CommandHandler, CallbackQueryHandler,
-    ConversationHandler, ContextTypes, TypeHandler, filters, PicklePersistence
+    Application, CommandHandler, MessageHandler,
+    CallbackQueryHandler, ConversationHandler, PicklePersistence, filters, ContextTypes
 )
-
-# Faqat Tokenni configdan olamiz
-try:
-    from .config import BOT_TOKEN
-except ImportError:  # Agar alohida ishga tushirilsa (test uchun)
-    # .env faylidan o'qishga harakat qilish
-    from dotenv import load_dotenv
-    import warnings
-
-    warnings.warn("Could not import from .config, trying dotenv directly for BOT_TOKEN")
-    # Loyiha root papkasini topish (taxminan)
-    dotenv_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), '.env')
-    load_dotenv(dotenv_path=dotenv_path)
-    BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-
-if not BOT_TOKEN:
-    raise ValueError("Minimal test uchun ham TELEGRAM_BOT_TOKEN kerak!")
+from telegram import Update  # <-- Update telegram'dan import qilinadi
+# Loyihamizning modullaridan import qilamiz
+from .config import (
+    BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
+    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES
+)
+from .handlers.common import cancel
+from .handlers.start_auth import (
+    start, set_language_callback, start_registration_callback,
+    contact_handler, otp_handler
+)
+from .handlers.order import handle_delivery_type_selection, handle_branch_selection, handle_location, \
+    handle_payment_selection, handle_notes, skip_notes_callback
+from .handlers.main_menu import main_menu_dispatch
+from .handlers.callbacks import (
+    category_selected_callback, product_selected_callback,
+    add_to_cart_callback, quantity_noop_callback, back_button_callback,
+    start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
+    cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback
+)
 
 # Logging
 logging.basicConfig(
@@ -30,81 +32,98 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# Minimal holat
-STATE_ONE = 1
-
-
-# Global logger (update kelayotganini tekshirish uchun)
-async def log_all_updates(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    logger.info(f"Received update: {update.update_id}")  # Faqat ID ni chiqaramiz qisqalik uchun
-
-
-# Minimal /start
-async def start_minimal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info("MINIMAL: /start called")
-    keyboard = [[InlineKeyboardButton("TEST TUGMASI", callback_data="test_state_1_callback")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Minimal test. Tugmani bosing:", reply_markup=reply_markup)
-    logger.info(f"MINIMAL: Transitioning to state: {STATE_ONE}")
-    return STATE_ONE
-
-
-# Minimal Callback Handler
-async def state_1_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    query = update.callback_query
-    # Callbackga javob berish juda muhim!
-    await query.answer("OK!")
-    logger.critical("!!!!!!!!!! MINIMAL state_1_callback ISHLADI! Data: %s !!!!!!!!!!", query.data)
-    await query.edit_message_text("Minimal test MUVAFFAQIYATLI! Suhbat tugadi.")
-    return ConversationHandler.END
-
-
-# Minimal Cancel
-async def cancel_minimal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    logger.info("MINIMAL: Cancel called.")
-    await update.message.reply_text("Minimal suhbat bekor qilindi.")
-    return ConversationHandler.END
-
 
 def main() -> None:
-    """Minimal botni ishga tushuradi va handlerlarni qo'shadi."""
-
-    # --- Persistence QAYTA QO'SHILDI ---
-    # Yangi fayl nomi ishlatamiz, eski bilan chalkashmasligi uchun
-    persistence = PicklePersistence(filepath="bot_storage_minimal_test.pickle")
-    # ------------------------------------
+    """Botni ishga tushuradi va handlerlarni qo'shadi."""
+    # Persistence
+    persistence = PicklePersistence(filepath="bot_storage.pickle")  # Asl fayl nomi
 
     application = (
         Application.builder()
         .token(BOT_TOKEN)
-        .persistence(persistence)  # <-- Qayta qo'shildi
+        .persistence(persistence)  # Persistence yoqilgan
         .build()
     )
 
-    # Global Logger
-    application.add_handler(TypeHandler(Update, log_all_updates), group=-1)
+    # --- Handlerlarni Qo'shish Tartibi ---
 
-    # Minimal Conversation Handler (YANGILANGAN)
-    minimal_conv_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start_minimal)],
+    # 1. Global logger (agar kerak bo'lsa, debug uchun)
+    # application.add_handler(TypeHandler(Update, log_all_updates), group=-1) # Hozircha o'chirib turamiz
+
+    # 2. Global CallbackQuery Handlerlar (ConversationHandler'dan oldin, block=False bilan)
+    application.add_handler(CallbackQueryHandler(category_selected_callback, pattern='^cat_', block=False))
+    application.add_handler(CallbackQueryHandler(product_selected_callback, pattern='^prod_', block=False))
+    application.add_handler(CallbackQueryHandler(add_to_cart_callback, pattern='^add_', block=False))
+    application.add_handler(CallbackQueryHandler(quantity_noop_callback, pattern='^p_noop_', block=False))
+    application.add_handler(CallbackQueryHandler(quantity_noop_callback, pattern='^p_info_', block=False))
+    application.add_handler(CallbackQueryHandler(back_button_callback, pattern='^back_to_', block=False))
+    # application.add_handler(CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$', block=False))
+    application.add_handler(
+        CallbackQueryHandler(cart_quantity_change_callback, pattern='^cart_(incr|decr)_', block=False))
+    application.add_handler(CallbackQueryHandler(cart_item_delete_callback, pattern='^cart_del_', block=False))
+    application.add_handler(CallbackQueryHandler(cart_info_noop_callback, pattern='^cart_info_', block=False))
+    application.add_handler(CallbackQueryHandler(cart_refresh_callback, pattern='^cart_refresh$', block=False))
+    application.add_handler(CallbackQueryHandler(order_detail_callback, pattern='^order_', block=False))
+    application.add_handler(CallbackQueryHandler(history_page_callback, pattern='^hist_page_', block=False))
+
+    # 3. Asosiy ConversationHandler (persistent=True va per_message=False bilan)
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
         states={
-            STATE_ONE: [
-                # --- per_message bu yerdan OLIB TASHLANADI ---
-                CallbackQueryHandler(state_1_callback, pattern='^test_state_1_callback$')
-                # -------------------------------------------
-            ]
+            SELECTING_LANG: [
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(set_language_callback, pattern='^set_lang_')
+            ],
+            AUTH_CHECK: [
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(start_registration_callback, pattern='^start_registration$')
+            ],
+            WAITING_PHONE: [MessageHandler(filters.CONTACT & ~filters.COMMAND, contact_handler)],
+            WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d{4,6}$'), otp_handler)],
+            MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_dispatch),
+                        CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$')
+                        ],
+            ASKING_DELIVERY_TYPE: [
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(handle_delivery_type_selection, pattern='^checkout_set_'),
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_BRANCH: [
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(handle_branch_selection, pattern='^checkout_branch_'),
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_LOCATION: [
+                MessageHandler(filters.LOCATION & ~filters.COMMAND, handle_location),
+                MessageHandler(filters.ALL & ~filters.COMMAND, lambda u, c: u.message.reply_text("...")),
+                # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_PAYMENT: [
+                CallbackQueryHandler(handle_payment_selection, pattern='^checkout_payment_'),
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_NOTES: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_notes),  # Matnli izohni ushlash
+                CallbackQueryHandler(skip_notes_callback, pattern='^checkout_skip_notes$'),  # Skip tugmasi
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')  # Bekor qilish
+            ],
         },
-        fallbacks=[CommandHandler("cancel", cancel_minimal)],
-        name="minimal_test_conv",
-        persistent=True,  # Bu qoladi (agar persistence'ni test qilayotgan bo'lsak)
-        # --- per_message BUTUN ConversationHandler UCHUN BU YERGA QO'SHILADI ---
+        fallbacks=[CommandHandler("cancel", cancel), CommandHandler("start", start)],
+        name="main_conversation",
+        persistent=True,
+        # --- per_message BUTUN ConversationHandler UCHUN FAQAT SHU YERGA QO'SHILADI ---
         per_message=False
-        # ----------------------------------------------------------------------
+        # --------------------------------------------------------------------------
     )
-    application.add_handler(minimal_conv_handler)
+    application.add_handler(conv_handler)
 
-    logger.info("Starting MINIMAL bot with PERSISTENCE...")  # Log xabari yangilandi
-    application.run_polling(drop_pending_updates=True)
+    # 4. Boshqa global Command/Message Handlerlar (hozircha yo'q)
+
+    logger.info("Starting bot...")
+    application.run_polling(drop_pending_updates=True)  # Eskirgan update'larni o'tkazib yuborish
 
 
 if __name__ == "__main__":
