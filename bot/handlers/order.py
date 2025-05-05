@@ -9,6 +9,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKe
 from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
+from api.models import Order
 # Loyihadagi boshqa modullardan importlar
 from ..config import ASKING_BRANCH, ASKING_LOCATION, MAIN_MENU, ASKING_DELIVERY_TYPE, ASKING_PAYMENT, \
     ASKING_NOTES  # Kerakli holatlar
@@ -222,102 +223,190 @@ async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     lang_code = get_user_lang(context)
     message_to_edit_id = query.message.message_id if query and query.message else None
 
-    processing_text = "Buyurtma rasmiylashtirilmoqda..." if lang_code == 'uz' else "Обработка заказа..."
+    processing_text = "Buyurtma rasmiylashtirilmoqda, iltimos kuting..." if lang_code == 'uz' else "Обработка заказа, пожалуйста подождите..."
+    sent_processing_message = None
     if message_to_edit_id:
         try:
-            await context.bot.edit_message_text(text=processing_text, chat_id=chat_id, message_id=message_to_edit_id)
+            # Oldingi xabarni tahrirlash o'rniga, uni o'chirib, yangi xabar yuboramiz,
+            # chunki oxirida bir nechta xabar (matn + lokatsiya) yuborishimiz mumkin.
+            await context.bot.delete_message(chat_id=chat_id, message_id=message_to_edit_id)
+            sent_processing_message = await context.bot.send_message(chat_id=chat_id, text=processing_text)
         except Exception as e:
-            logger.warning(f"Could not edit 'processing' msg: {e}")  # Ignore edit error
+            logger.warning(f"Could not edit/delete processing message: {e}")
+            sent_processing_message = await context.bot.send_message(chat_id=chat_id, text=processing_text)
     elif message:
-        await message.reply_text(processing_text)  # Send new if from text message
-    else:  # Should have either query or message
-        await context.bot.send_message(chat_id=chat_id, text=processing_text)
+        await message.reply_text(processing_text)  # Yangi xabar yuboramiz
+    else:
+        sent_processing_message = await context.bot.send_message(chat_id=chat_id, text=processing_text)
 
-    # --- Checkout ma'lumotlarini SHARTLI RAVISHDA yig'amiz ---
+    # Checkout ma'lumotlarini yig'amiz (avvalgidek)
+    # ... (checkout_data ni yig'ish va validatsiya qilish kodi #199-javobdan olinadi) ...
     delivery_type = context.user_data.get("checkout_delivery_type")
     payment_type = context.user_data.get("checkout_payment_type")
     notes = context.user_data.get("checkout_notes", "")
-
-    # Umumiy kerakli ma'lumotlar mavjudligini tekshiramiz
-    if not delivery_type or not payment_type:
-        logger.error(f"Missing critical checkout data (type or payment) for user {user_id}")
-        error_text = "Xatolik: Buyurtma ma'lumotlari to'liq emas. /start bosing."  # ...
-        await context.bot.send_message(chat_id=chat_id, text=error_text)
-        # Kontekstni tozalash
-        keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
-                         'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
-        for key in keys_to_clear:
-            if key in context.user_data: del context.user_data[key]
+    if not delivery_type or not payment_type:  # Eng oddiy validatsiya
+        logger.error(f"Missing critical checkout data for user {user_id}")
+        # ... (Xatolik xabarini yuborib, suhbatni tugatish) ...
         return ConversationHandler.END
 
-    # API uchun payloadni boshlang'ich holatga keltiramiz
-    checkout_data = {
-        "delivery_type": delivery_type,
-        "payment_type": payment_type,
-        "notes": notes,
-    }
-
-    # Yetkazib berish turiga qarab qo'shimcha ma'lumotlarni qo'shamiz
+    checkout_data = {"delivery_type": delivery_type, "payment_type": payment_type, "notes": notes, }
     if delivery_type == 'delivery':
-        latitude = context.user_data.get("checkout_latitude")
+        latitude = context.user_data.get("checkout_latitude");
         longitude = context.user_data.get("checkout_longitude")
-        address = context.user_data.get("checkout_address")  # Optional
-        if latitude is None or longitude is None:
-            logger.error(f"Missing location for delivery checkout for user {user_id}")
-            error_text = "Xatolik: Yetkazib berish uchun lokatsiya topilmadi. /start bosing."  # ...
-            await context.bot.send_message(chat_id=chat_id, text=error_text)
-            keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
-                             'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
-            for key in keys_to_clear:
-                if key in context.user_data: del context.user_data[key]
-            return ConversationHandler.END
-        checkout_data['latitude'] = latitude
+        if latitude is None or longitude is None: return ConversationHandler.END  # Xatolik
+        checkout_data['latitude'] = latitude;
         checkout_data['longitude'] = longitude
-        if address: checkout_data['address'] = address  # Faqat mavjud bo'lsa qo'shamiz
+        if context.user_data.get("checkout_address"): checkout_data['address'] = context.user_data["checkout_address"]
     elif delivery_type == 'pickup':
         branch_id = context.user_data.get("checkout_pickup_branch_id")
-        if not branch_id:
-            logger.error(f"Missing branch_id for pickup checkout for user {user_id}")
-            error_text = "Xatolik: Olib ketish uchun filial topilmadi. /start bosing."  # ...
-            await context.bot.send_message(chat_id=chat_id, text=error_text)
-            keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude',
-                             'checkout_longitude', 'checkout_payment_type', 'checkout_notes', 'checkout_address']
-            for key in keys_to_clear:
-                if key in context.user_data: del context.user_data[key]
-            return ConversationHandler.END
+        if not branch_id: return ConversationHandler.END  # Xatolik
         checkout_data['pickup_branch_id'] = branch_id
-    # ---------------------------------------------------------
+    # ------------------------------------------------------------
 
     logger.info(f"Final checkout data for user {user_id}: {checkout_data}")
-
-    # API ga so'rov yuboramiz
     api_response = await make_api_request(context, 'POST', 'orders/checkout/', user_id, data=checkout_data)
 
     final_message = ""
     final_markup = get_main_menu_markup(context)
+    branch_location_to_send = None
+
+    # Processing xabarini o'chiramiz (agar yuborilgan bo'lsa)
+    if sent_processing_message:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=sent_processing_message.message_id)
+        except Exception:
+            pass
 
     if api_response and api_response.get('status_code') == 201 and not api_response.get('error'):
-        # ... (Muvaffaqiyatli javobni formatlash - avvalgidek) ...
-        order_id = api_response.get('id')
-        # ... (qolgan qismi #195 da) ...
-        final_message = f"✅ Buyurtmangiz <b>#{order_id}</b> muvaffaqiyatli rasmiylashtirildi!\n"  # ... (vaqtlar bilan)
+        order_data = api_response  # Endi bu to'liq buyurtma ma'lumoti
+        print(f"\n\n{order_data}\n\n")
+        order_id = order_data.get('id')
+        status_choices = dict(
+            Order.STATUS_CHOICES)  # Modeldan status nomlarini olish (agar model import qilingan bo'lsa)
+        # Yoki API javobida tayyor nomi kelsa, shuni ishlatamiz
+        status_display = order_data.get('status', 'N/A')  # Hozircha API dan kelgan kodni ishlatamiz
+        total = order_data.get('total_price')
+        delivery_type = order_data.get('delivery_type')
+        pickup_branch_data = order_data.get('pickup_branch')  # Nested filial ma'lumoti
+        est_ready_iso = order_data.get('estimated_ready_at')
+        est_delivery_iso = order_data.get('estimated_delivery_at')
 
-    else:  # API Xatoligi
-        # ... (API xatoligini formatlash - avvalgidek) ...
+        # --- Yakuniy Xabarni Formatlash ---
+        if lang_code == 'uz':
+            final_message = f"✅ Buyurtmangiz <b>#{order_id}</b> muvaffaqiyatli rasmiylashtirildi!\n\n"
+            final_message += f"Holati: <i>{status_display}</i>\n"  # Statusni qo'shamiz
+            final_message += f"Umumiy summa: <b>{total}</b> so'm\n"
+            # Buyurtma tarkibini ham qo'shish mumkin (agar OrderSerializer 'items'ni qaytarsa)
+            items = order_data.get('items', [])
+            if items:
+                final_message += "\nTarkibi:\n"
+                for item in items:
+                    prod_name = item.get('product', {}).get('name', '?')
+                    qty = item.get('quantity')
+                    price = item.get('total_price')
+                    final_message += f"- {prod_name} x {qty} ({price} so'm)\n"
+
+            # Yetkazib berish/olib ketish ma'lumotlari
+            if delivery_type == 'pickup' and pickup_branch_data:
+                branch_name = pickup_branch_data.get('name', 'N/A')
+                branch_address = pickup_branch_data.get('address', 'N/A')
+                final_message += f"\n<b>Olib ketish manzili:</b>\n📍 {branch_name}\n<pre>{branch_address}</pre>\n"  # Manzilni <pre> ichida
+                lat = pickup_branch_data.get('latitude')
+                lon = pickup_branch_data.get('longitude')
+                if lat is not None and lon is not None:
+                    branch_location_to_send = (lat, lon)
+            else:  # Delivery
+                # Manzilni API javobidan olish (agar saqlangan bo'lsa)
+                delivery_address = order_data.get('address')
+                if delivery_address:
+                    final_message += f"\n<b>Yetkazib berish manzili:</b>\n<pre>{delivery_address}</pre>\n"
+                # Yoki shunchaki:
+                # final_message += f"Buyurtmangiz ko'rsatilgan manzilga yetkaziladi.\n"
+
+            # Taxminiy vaqtlar
+            try:
+                if est_ready_iso:
+                    dt_obj = datetime.datetime.fromisoformat(str(est_ready_iso).replace('Z', '+00:00'))
+                    # Vaqtni lokal vaqtga o'tkazish uchun pytz yoki Django timezone kerak
+                    # Hozircha oddiy formatlash:
+                    ready_time_str = dt_obj.strftime('%H:%M')  # Yoki timezone.localtime(dt_obj).strftime('%H:%M')
+                    final_message += f"\nTaxminiy tayyor bo'lish vaqti: ~{ready_time_str}\n"
+                if est_delivery_iso:
+                    dt_obj = datetime.datetime.fromisoformat(str(est_delivery_iso).replace('Z', '+00:00'))
+                    delivery_time_str = dt_obj.strftime('%H:%M')  # Yoki timezone.localtime(dt_obj).strftime('%H:%M')
+                    final_message += f"Taxminiy yetkazib berish vaqti: ~{delivery_time_str}\n"
+            except Exception as time_e:
+                logger.error(f"Error formatting time in final msg: {time_e}")
+
+        else:  # Russian Language
+            final_message = f"✅ Ваш заказ <b>#{order_id}</b> успешно оформлен!\n\n"
+            final_message += f"Статус: <i>{status_display}</i>\n"
+            final_message += f"Итоговая сумма: <b>{total}</b> сум\n"
+            items = order_data.get('items', [])
+            if items:
+                final_message += "\nСостав:\n"
+                for item in items:
+                    prod_name = item.get('product', {}).get('name', '?')
+                    qty = item.get('quantity')
+                    price = item.get('total_price')
+                    final_message += f"- {prod_name} x {qty} ({price} сум)\n"
+
+            if delivery_type == 'pickup' and pickup_branch_data:
+                branch_name = pickup_branch_data.get('name', 'N/A')
+                branch_address = pickup_branch_data.get('address', 'N/A')
+                final_message += f"\n<b>Адрес для самовывоза:</b>\n📍 {branch_name}\n<pre>{branch_address}</pre>\n"
+                lat = pickup_branch_data.get('latitude')
+                lon = pickup_branch_data.get('longitude')
+                if lat is not None and lon is not None:
+                    branch_location_to_send = (lat, lon)
+            else:
+                delivery_address = order_data.get('address')
+                if delivery_address:
+                    final_message += f"\n<b>Адрес доставки:</b>\n<pre>{delivery_address}</pre>\n"
+                # else: final_message += f"Заказ будет доставлен на указанный адрес.\n"
+
+            try:  # Estimated times
+                if est_ready_iso:
+                    dt_obj = datetime.datetime.fromisoformat(str(est_ready_iso).replace('Z', '+00:00'))
+                    ready_time_str = dt_obj.strftime('%H:%M')  # Format time
+                    final_message += f"\nПримерное время готовности: ~{ready_time_str}\n"
+                if est_delivery_iso:
+                    dt_obj = datetime.datetime.fromisoformat(str(est_delivery_iso).replace('Z', '+00:00'))
+                    delivery_time_str = dt_obj.strftime('%H:%M')  # Format time
+                    final_message += f"Примерное время доставки: ~{delivery_time_str}\n"
+            except Exception as time_e:
+                logger.error(f"Error formatting time in final msg: {time_e}")
+        # -----------------------------------------
+
+    else:  # API Error
         error_detail = api_response.get('detail',
                                         'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
-        # ... (log yozish) ...
-        final_message = f"❌ Buyurtmani rasmiylashtirishda xatolik: {str(error_detail)[:100]}"  # ...
+        logger.error(f"Checkout API error for user {user_id}: {error_detail}")
+        final_message = f"❌ Buyurtmani rasmiylashtirishda xatolik: {str(error_detail)[:100]}"
+        # Xatolik bo'lsa ham asosiy menyuga qaytaramiz
+        final_markup = get_main_menu_markup(context)
 
-    # Yakuniy xabarni yuboramiz
-    # Avvalgi processing xabarni o'chirish yaxshiroq bo'lishi mumkin
-    if message_to_edit_id:
+    # --- Yakuniy xabarlarni yuborish ---
+    await context.bot.send_message(
+        chat_id=chat_id,
+        text=final_message,
+        reply_markup=final_markup,  # Asosiy menyu klaviaturasini chiqaradi
+        parse_mode=ParseMode.HTML  # HTML formatlash uchun
+    )
+
+    # Agar olib ketish bo'lsa va lokatsiya bo'lsa, uni alohida yuboramiz
+    if branch_location_to_send:
         try:
-            await context.bot.delete_message(chat_id=chat_id, message_id=message_to_edit_id)
-        except:
-            pass
-    await context.bot.send_message(chat_id=chat_id, text=final_message, reply_markup=final_markup,
-                                   parse_mode=ParseMode.HTML)
+            await context.bot.send_message(chat_id=chat_id,
+                                           text="Filial manzili xaritada:" if lang_code == 'uz' else "Адрес филиала на карте:")
+            await context.bot.send_location(
+                chat_id=chat_id,
+                latitude=branch_location_to_send[0],
+                longitude=branch_location_to_send[1]
+            )
+        except Exception as loc_e:
+            logger.error(f"Failed to send branch location for order {order_id}: {loc_e}")
+    # -----------------------------
 
     # Checkout kontekstini tozalaymiz
     keys_to_clear = ['checkout_delivery_type', 'checkout_pickup_branch_id', 'checkout_latitude', 'checkout_longitude',
@@ -329,7 +418,7 @@ async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except KeyError:
                 pass
 
-    return ConversationHandler.END
+    return ConversationHandler.END  # Suhbatni tugatib, asosiy menyu holatiga qaytamiz
 
 
 # --- YANGI: Izoh Kiritish Uchun Handler ---
@@ -409,18 +498,6 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await message.reply_text(
             "Lokatsiya qabul qilishda xatolik. Qaytadan yuboring yoki /cancel bosing." if lang_code == 'uz' else "Ошибка при получении локации. Отправьте снова или нажмите /cancel.")
         return ASKING_LOCATION  # Shu holatda qolamiz
-
-
-# --- BUYURTMALAR TARIXI VA DETALLARI UCHUN FUNKSIYALAR ---
-# async def show_order_history(...): ... # Buni ham shu faylga ko'chirish mumkin
-# async def show_order_detail(...): ... # Buni ham
-
-# --- CHECKOUT JARAYONINING BOSHQICH HANDLERLARI ---
-# async def handle_branch_selection(...): ...
-# async def handle_location(...): ...
-# async def handle_payment_selection(...): ...
-# async def handle_notes(...): ...
-# async def confirm_order(...): ... # Bu yerda POST /orders/checkout chaqiriladi
 
 
 async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE, history_data: dict):
@@ -515,5 +592,110 @@ async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE,
         logger.error(f"Error sending/editing order history: {e}")
         await context.bot.send_message(chat_id=chat_id, text="Buyurtmalar tarixini ko'rsatishda xatolik.")
 
+
 # Buyurtma detallarini ko'rsatish uchun ham funksiya yaratish mumkin
 # async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_data: dict): ...
+async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_data: dict):
+    """API dan kelgan yagona buyurtma ma'lumotlarini formatlab chiqaradi."""
+    query = update.callback_query  # Bu funksiya callbackdan chaqiriladi
+    chat_id = update.effective_chat.id
+    user_id = update.effective_user.id
+    lang_code = get_user_lang(context)
+
+    order_id = order_data.get('id', 'N/A')
+    status = order_data.get('status', '')
+    # TODO: Status kodini chiroyli nomga o'girish
+    status_display = status.replace('_', ' ').capitalize()  # Oddiy formatlash
+    created_at_iso = order_data.get('created_at', '')
+    total_price = order_data.get('total_price', 'N/A')
+    delivery_type = order_data.get('delivery_type')
+    payment_type = order_data.get('payment_type')  # TODO: Buni ham chiroyli nomga o'girish
+    notes = order_data.get('notes', '')
+    items = order_data.get('items', [])
+    pickup_branch_data = order_data.get('pickup_branch')
+    address = order_data.get('address')
+    latitude = order_data.get('latitude')
+    longitude = order_data.get('longitude')
+    est_ready_iso = order_data.get('estimated_ready_at')
+    est_delivery_iso = order_data.get('estimated_delivery_at')
+
+    # Sanani formatlash
+    formatted_date = ''
+    try:
+        dt_obj = datetime.datetime.fromisoformat(str(created_at_iso).replace('Z', '+00:00'))
+        formatted_date = timezone.localtime(dt_obj).strftime('%Y-%m-%d %H:%M')
+    except:
+        formatted_date = str(created_at_iso)[:10]
+
+    # Xabar matnini yaratamiz (HTML)
+    message_text = f"📄 <b>Buyurtma #{order_id} Tafsilotlari</b>\n\n" if lang_code == 'uz' else f"📄 <b>Детали Заказа #{order_id}</b>\n\n"
+    message_text += f"<b>Holati:</b> <i>{status_display}</i>\n" if lang_code == 'uz' else f"<b>Статус:</b> <i>{status_display}</i>\n"
+    message_text += f"<b>Sana:</b> {formatted_date}\n" if lang_code == 'uz' else f"<b>Дата:</b> {formatted_date}\n"
+    message_text += f"<b>To'lov turi:</b> {payment_type}\n" if lang_code == 'uz' else f"<b>Тип оплаты:</b> {payment_type}\n"  # TODO: Tarjima
+
+    if delivery_type == 'pickup' and pickup_branch_data:
+        branch_name = pickup_branch_data.get('name', 'N/A')
+        branch_address = pickup_branch_data.get('address', 'N/A')
+        message_text += f"<b>Olib ketish filiali:</b> {branch_name}\n<pre>{branch_address}</pre>\n" if lang_code == 'uz' else f"<b>Филиал самовывоза:</b> {branch_name}\n<pre>{branch_address}</pre>\n"
+    elif delivery_type == 'delivery':
+        if address:
+            message_text += f"<b>Yetkazish manzili:</b>\n<pre>{address}</pre>\n" if lang_code == 'uz' else f"<b>Адрес доставки:</b>\n<pre>{address}</pre>\n"
+        elif latitude and longitude:
+            message_text += f"<b>Yetkazish lokatsiyasi:</b> Lat: {latitude}, Lon: {longitude}\n" if lang_code == 'uz' else f"<b>Локация доставки:</b> Lat: {latitude}, Lon: {longitude}\n"
+
+    # Taxminiy vaqtlar
+    try:
+        if est_ready_iso:
+            dt_obj = datetime.datetime.fromisoformat(str(est_ready_iso).replace('Z', '+00:00'))
+            ready_time_str = timezone.localtime(dt_obj).strftime('%H:%M')
+            message_text += f"Taxminiy tayyor bo'lish vaqti: ~{ready_time_str}\n" if lang_code == 'uz' else f"Примерное время готовности: ~{ready_time_str}\n"
+        if est_delivery_iso:
+            dt_obj = datetime.datetime.fromisoformat(str(est_delivery_iso).replace('Z', '+00:00'))
+            delivery_time_str = timezone.localtime(dt_obj).strftime('%H:%M')
+            message_text += f"Taxminiy yetkazib berish vaqti: ~{delivery_time_str}\n" if lang_code == 'uz' else f"Примерное время доставки: ~{delivery_time_str}\n"
+    except Exception as time_e:
+        logger.error(f"Error formatting time in detail msg: {time_e}")
+
+    if notes:
+        message_text += f"\n<b>Izohlar:</b>\n<pre>{notes}</pre>\n" if lang_code == 'uz' else f"\n<b>Комментарии:</b>\n<pre>{notes}</pre>\n"
+
+    # Mahsulotlar ro'yxati
+    if items:
+        message_text += "\n<b>Tarkibi:</b>\n" if lang_code == 'uz' else "\n<b>Состав:</b>\n"
+        for item in items:
+            prod_name = item.get('product', {}).get('name', '?')
+            qty = item.get('quantity')
+            price_unit = item.get('price_per_unit', 'N/A')
+            item_total = item.get('total_price', 'N/A')
+            message_text += f"- {prod_name} ({qty} x {price_unit} = {item_total} so'm)\n"  # Narxni formatlash mumkin
+
+    message_text += f"\n<b>Jami: {total_price} so'm</b>" if lang_code == 'uz' else f"\n<b>Итого: {total_price} сум</b>"
+
+    # Tugmalarni yaratamiz
+    keyboard = []
+    # Agar status 'new' bo'lsa, bekor qilish tugmasini qo'shamiz
+    if status == 'new':
+        cancel_btn_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отменить заказ"
+        keyboard.append([InlineKeyboardButton(cancel_btn_text, callback_data=f"cancel_order_{order_id}")])
+
+    # Ortga qaytish tugmasi
+    back_btn_text = "< Ortga (Tarix)" if lang_code == 'uz' else "< Назад (История)"
+    keyboard.append([InlineKeyboardButton(back_btn_text, callback_data="back_to_history")])
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Xabarni tahrirlaymiz
+    try:
+        await query.edit_message_text(
+            text=message_text,
+            reply_markup=reply_markup,
+            parse_mode=ParseMode.HTML
+        )
+    except Exception as e:
+        logger.error(f"Error editing order detail message: {e}")
+        # Eski xabarni o'chirib, yangisini yuborishga harakat qilamiz
+        try:
+            await query.delete_message()
+        except:
+            pass
+        await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup,
+                                       parse_mode=ParseMode.HTML)

@@ -1,5 +1,32 @@
 # bot/bot.py (MINIMAL TEST KODI)
 import logging
+import os
+import sys  # <-- sys import qilindi
+import django  # <-- django import qilindi
+
+print(f"DEBUG: Running script from: {__file__}")
+
+# --- Django Sozlamalarini Yuklash ---
+try:
+    # Skript ishlayotgan papkadan loyiha root papkasiga chiqish
+    # Hozirgi fayl: D:\Hojiakbar\telegrambot_api\bot\bot.py
+    # Loyiha root: D:\Hojiakbar\telegrambot_api
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    print(f"DEBUG: Adding project root to path: {project_root}")
+    if project_root not in sys.path:
+        sys.path.append(project_root)
+
+    # Django settings modulini ko'rsatamiz ('backend_config' o'rniga loyiha sozlamalari papkangiz nomi)
+    os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend_config.settings')
+
+    print("DEBUG: Calling django.setup()...")
+    django.setup()
+    print("DEBUG: django.setup() completed.")
+except Exception as e:
+    print(f"CRITICAL ERROR: Failed to setup Django: {e}")
+    # Django sozlamalari yuklanmasa, bot ishlay olmaydi
+    sys.exit("Django sozlamalarini yuklab bo'lmadi. Chiqilmoqda.")
+# --- Django Sozlamalari Yuklandi ---
 
 from telegram.ext import (
     Application, CommandHandler, MessageHandler,
@@ -9,7 +36,7 @@ from telegram import Update  # <-- Update telegram'dan import qilinadi
 # Loyihamizning modullaridan import qilamiz
 from .config import (
     BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
-    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES
+    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES,
 )
 from .handlers.common import cancel
 from .handlers.start_auth import (
@@ -23,7 +50,8 @@ from .handlers.callbacks import (
     category_selected_callback, product_selected_callback,
     add_to_cart_callback, quantity_noop_callback, back_button_callback,
     start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
-    cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback
+    cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback,
+    cancel_order_callback, back_to_history_callback
 )
 
 # Logging
@@ -65,6 +93,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cart_refresh_callback, pattern='^cart_refresh$', block=False))
     application.add_handler(CallbackQueryHandler(order_detail_callback, pattern='^order_', block=False))
     application.add_handler(CallbackQueryHandler(history_page_callback, pattern='^hist_page_', block=False))
+    application.add_handler(CallbackQueryHandler(cancel_order_callback, pattern='^cancel_order_'))
+    application.add_handler(CallbackQueryHandler(back_to_history_callback, pattern='^back_to_history$'))
 
     # 3. Asosiy ConversationHandler (persistent=True va per_message=False bilan)
     conv_handler = ConversationHandler(

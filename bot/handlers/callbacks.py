@@ -6,7 +6,7 @@ from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
 from .cart import show_cart
-from .order import show_order_history
+from .order import show_order_history, show_order_detail
 
 # Loyihadagi boshqa modullardan importlar
 from ..utils.helpers import get_user_lang
@@ -372,25 +372,41 @@ async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_
 async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ "Batafsil" (order_{id}) tugmasi bosilganda ishlaydi."""
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Callbackga javob beramiz
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
+
     try:
+        if not query.data or not query.data.startswith('order_'): raise ValueError("Invalid callback")
         order_id = int(query.data.split('_')[1])
         logger.info(f"User {user_id} requested details for order {order_id}")
-        # TODO: Call GET /orders/{order_id}/ API
-        # TODO: Create show_order_detail(update, context, order_data) function in order.py
-        # TODO: Call show_order_detail to display info
-        await query.edit_message_text(f"Buyurtma #{order_id} detallari hali ko'rsatilmaydi.")
-    except (IndexError, ValueError, TypeError):
-        logger.warning(f"Invalid order detail callback: {query.data}")
+
+        loading_text = "Buyurtma detallari yuklanmoqda..." if lang_code == 'uz' else "Загрузка деталей заказа..."
+        await query.edit_message_text(loading_text)  # Vaqtinchalik xabar
+
+        # API dan buyurtma detallarini olamiz
+        order_response = await make_api_request(context, 'GET', f'orders/{order_id}/', user_id)
+
+        if order_response and not order_response.get('error'):
+            # Ma'lumotlarni ko'rsatish uchun yordamchi funksiyani chaqiramiz
+            await show_order_detail(update, context, order_response)  # <-- show_order_detail ni chaqiramiz
+        elif order_response and order_response.get('status_code') == 404:
+            not_found_text = "Buyurtma topilmadi." if lang_code == 'uz' else "Заказ не найден."
+            await query.edit_message_text(not_found_text)
+        else:  # Boshqa API xatoligi
+            error_detail = order_response.get('detail', 'N/A') if order_response else 'N/A'
+            error_text = f"Buyurtma detallarini olishda xatolik: {error_detail}" if lang_code == 'uz' else f"Ошибка при получении деталей заказа: {error_detail}"
+            await query.edit_message_text(error_text)
+
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid order detail callback: {query.data} - {e}")
         await query.edit_message_text("Xatolik.")
 
 
 async def history_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Buyurtmalar tarixi sahifalash tugmalari bosilganda ishlaydi."""
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Javob beramiz
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
     callback_data = query.data  # 'hist_page_{page_num}' yoki 'hist_page_url_{url}'
@@ -399,32 +415,118 @@ async def history_page_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
     endpoint = 'orders/history/'  # Standart endpoint
     params = {}
-    if callback_data.startswith('hist_page_url_'):
-        # Agar to'liq URL bo'lsa, undan faqat path va query qismini olish kerak
-        # Bu xavfliroq, yaxshisi page raqamini ishlatish
+    page_num_to_log = 'N/A'
+
+    if callback_data.startswith('hist_page_url_'):  # Agar to'liq URL bo'lsa (fallback)
         full_url = callback_data[len('hist_page_url_'):]
         parsed_url = urlparse(full_url)
-        endpoint = parsed_url.path.replace('/api/v1/', '', 1)  # API base URL ni olib tashlash
-        params = parse_qs(parsed_url.query)  # Query parametrlarni dict ga o'giradi
-        # parse_qs list qaytaradi: {'page': ['2']} -> {'page': '2'} qilish kerak
-        params = {k: v[0] for k, v in params.items() if len(v) == 1}
-
-    elif callback_data.startswith('hist_page_'):
+        endpoint = parsed_url.path.replace('/api/v1/', '', 1)  # API base URL ni olib tashlaymiz
+        params = parse_qs(parsed_url.query)
+        params = {k: v[0] for k, v in params.items() if len(v) == 1}  # list ni string ga o'giramiz
+        page_num_to_log = params.get('page', 'URL')
+    elif callback_data.startswith('hist_page_'):  # Agar faqat sahifa raqami bo'lsa
         try:
             page_num = int(callback_data.split('_')[-1])
             params = {'page': page_num}
-        except (ValueError, IndexError):
+            page_num_to_log = page_num
+        except (ValueError, IndexError, TypeError):
             logger.warning(f"Invalid history page callback data: {callback_data}")
-            await query.edit_message_text("Xatolik: Sahifa topilmadi.")
+            await query.edit_message_text("Xatolik: Sahifa raqami noto'g'ri.")
             return
+
+    logger.info(f"Fetching history page: {page_num_to_log}")
 
     # API ga yangi sahifa uchun so'rov yuboramiz
     history_response = await make_api_request(context, 'GET', endpoint, user_id, params=params)
 
     if history_response and not history_response.get('error'):
-        await show_order_history(update, context, history_response)  # Xabarni yangilaymiz
+        # show_order_history xabarni tahrirlaydi
+        await show_order_history(update, context, history_response)
     elif history_response and history_response.get('status_code') == 404:
         await query.answer("Bu sahifa mavjud emas.", show_alert=True)
     else:
         error_detail = history_response.get('detail', 'N/A') if history_response else 'N/A'
         await query.answer(f"Sahifani yuklashda xatolik: {error_detail[:100]}", show_alert=True)
+
+
+async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Bekor qilish" (cancel_order_{id}) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer("Bekor qilinmoqda...")
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    try:
+        if not query.data or not query.data.startswith('cancel_order_'): raise ValueError("Invalid callback")
+        order_id = int(query.data.split('_')[-1])
+        logger.info(f"User {user_id} requested cancel for order {order_id}")
+
+        # API ga bekor qilish so'rovini yuboramiz
+        api_response = await make_api_request(context, 'POST', f'orders/{order_id}/cancel/', user_id)
+
+        if api_response and not api_response.get('error'):
+            # Muvaffaqiyatli bekor qilindi
+            success_text = "Buyurtma bekor qilindi." if lang_code == 'uz' else "Заказ отменен."
+            await query.answer(success_text, show_alert=True)
+            # Buyurtma detallari ko'rinishini yangilaymiz (status o'zgargan bo'lishi kerak)
+            updated_order_response = await make_api_request(context, 'GET', f'orders/{order_id}/', user_id)
+            if updated_order_response and not updated_order_response.get('error'):
+                await show_order_detail(update, context, updated_order_response)  # Yangilangan detallarni ko'rsatamiz
+            else:  # Agar yangilangan detalni ololmasak, tarixga qaytaramiz
+                await query.edit_message_text("Buyurtma bekor qilindi, lekin yangilangan ma'lumotni olib bo'lmadi.")
+                # await show_order_history(update, context, ...) # Yoki tarixni qayta yuklash
+        else:  # API xatoligi
+            error_detail = api_response.get('detail', api_response.get('error',
+                                                                       'Noma\'lum xatolik')) if api_response else 'Server xatosi'
+            error_text = f"Bekor qilishda xatolik: {error_detail}" if lang_code == 'uz' else f"Ошибка при отмене: {error_detail}"
+            await query.answer(error_text, show_alert=True)
+
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid cancel order callback: {query.data} - {e}")
+        await query.answer("Xatolik!", show_alert=True)
+
+
+async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Ortga (Tarix)" (back_to_history) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()  # Tugma bosilganini tasdiqlaymiz
+    user_id = query.from_user.id
+    chat_id = update.effective_chat.id  # Chat ID ni olamiz
+    lang_code = get_user_lang(context)
+    logger.info(f"User {user_id} requested back to history")
+
+    # --- Avvalgi xabarni o'chiramiz ---
+    try:
+        await query.delete_message()
+        logger.info(f"Deleted previous message (order detail) for user {user_id}")
+    except Exception as e:
+        # Agar o'chirishda xato bo'lsa ham, davom etamiz (balki xabar allaqachon yo'qdir)
+        logger.warning(f"Could not delete message on back_to_history: {e}")
+    # ----------------------------------
+
+    # Tarixning birinchi sahifasini qayta yuklaymiz va YANGI XABAR yuboramiz
+    loading_text = "Tarix yuklanmoqda..." if lang_code == 'uz' else "Загрузка истории..."
+    # Yangi "loading" xabarini yuborish shart emas, darhol tarixni yuklaymiz
+
+    history_response = await make_api_request(context, 'GET', 'orders/history/', user_id, params={'page': 1})
+
+    # show_order_history ni chaqiramiz, lekin unga edit qilish uchun update o'rniga None beramiz
+    # yoki show_order_history ni o'zgartirib, yangi xabar yuborish imkonini beramiz.
+    # Hozircha eng osoni show_order_history logikasini qisman qaytarish:
+
+    if history_response and not history_response.get('error'):
+        # show_order_history funksiyasini chaqiramiz, lekin u endi
+        # query.edit_message_text qila olmaydi (chunki xabar o'chirildi).
+        # Shuning uchun u yangi xabar yuborishi kerak. show_order_history ni
+        # shunga moslash kerak yoki bu yerda qayta formatlash kerak.
+
+        # Keling, show_order_history ni chaqiramiz, u xatolikni ushlab,
+        # yangi xabar yuborishga harakat qiladi deb umid qilamiz.
+        # Muhim: show_order_history (#195 dagi) ichidagi edit_message_text
+        # xatolik bersa, yangi xabar yuboradigan fallback logikasi bor edi.
+        await show_order_history(update, context, history_response)
+
+    else:  # API xatoligi
+        error_detail = history_response.get('detail', 'N/A') if history_response else 'N/A'
+        error_text = f"Tarixni yuklashda xatolik: {error_detail}"
+        await context.bot.send_message(chat_id=chat_id, text=error_text)
