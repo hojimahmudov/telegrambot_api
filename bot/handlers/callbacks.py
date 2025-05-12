@@ -2,6 +2,8 @@
 import logging
 from urllib.parse import urlparse, parse_qs
 
+import datetime
+from django.utils import timezone
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 from telegram.constants import ParseMode
@@ -369,6 +371,130 @@ async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_
     return ASKING_DELIVERY_TYPE  # Yetkazib berish turini kutish holati
 
 
+async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Ortga (Tarix)" (back_to_history) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+    logger.info(f"BACK_BTN_LOG: User {user_id} requested back to history.")  # LOG 1
+
+    try:
+        await query.delete_message()
+        logger.info(f"BACK_BTN_LOG: Deleted previous message for user {user_id}")  # LOG 2
+    except Exception as e:
+        logger.warning(f"BACK_BTN_LOG: Could not delete previous message: {e}")
+
+    loading_text = "Buyurtmalar tarixi yuklanmoqda..." if lang_code == 'uz' else "Загрузка истории заказов..."
+    sent_loading_message = None
+    try:
+        logger.info("BACK_BTN_LOG: Attempting to send 'Loading history...' message.")  # LOG 3
+        sent_loading_message = await context.bot.send_message(chat_id=chat_id, text=loading_text)
+        if sent_loading_message:
+            logger.info(
+                f"BACK_BTN_LOG: Sent 'Loading history...' message with ID {sent_loading_message.message_id}.")  # LOG 4
+        else:
+            logger.error("BACK_BTN_LOG: context.bot.send_message returned None for loading message.")
+            return
+    except Exception as e:
+        logger.error(f"BACK_BTN_LOG: CRITICAL - Failed to send 'Loading history...' message: {e}", exc_info=True)
+        return
+
+    logger.info("BACK_BTN_LOG: Attempting to fetch order history from API (page 1).")  # LOG 5
+    history_response = await make_api_request(context, 'GET', 'orders/history/', user_id, params={'page': 1})
+    logger.info(f"BACK_BTN_LOG: API response for history: {history_response}")  # LOG 6
+
+    final_text = "Xatolik yuz berdi."  # Standart xato matni
+    final_markup = None
+
+    if history_response and not history_response.get('error'):
+        logger.info("BACK_BTN_LOG: API response OK. Formatting history.")  # LOG 7
+        orders = history_response.get('results', [])
+        count = history_response.get('count', 0)
+        next_page_url = history_response.get('next')
+        previous_page_url = history_response.get('previous')
+
+        if count == 0:
+            final_text = "Sizda hali buyurtmalar mavjud emas." if lang_code == 'uz' else "У вас пока нет заказов."
+        else:
+            page_title = " (1-sahifa)" if lang_code == 'uz' else " (Страница 1)"
+            final_text = f"📋 <b>Buyurtmalar Tarixi{page_title}:</b>\n\n" if lang_code == 'uz' else f"📋 <b>История Заказов{page_title}:</b>\n\n"
+            keyboard_list = []
+            for order in orders:
+                order_id_str = str(order.get('id', 'N/A'))
+                status = order.get('status', '')
+                status_display = status.replace('_', ' ').capitalize()
+                created_at = order.get('created_at', '')
+                try:
+                    dt_obj = datetime.datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
+                    formatted_date = timezone.localtime(dt_obj).strftime('%Y-%m-%d %H:%M')
+                except Exception as e_date:
+                    logger.warning(f"BACK_BTN_LOG: Error formatting date '{created_at}': {e_date}")
+                    formatted_date = str(created_at)[:10]
+                total = order.get('total_price', 'N/A')
+
+                final_text += f"🆔 {order_id_str} | {formatted_date} | <i>{status_display}</i> | {total} so'm\n---\n"
+                detail_button_text = "Batafsil" if lang_code == 'uz' else "Подробнее"
+                keyboard_list.append([InlineKeyboardButton(f"{detail_button_text} (#{order_id_str})",
+                                                           callback_data=f"order_{order_id_str}")])
+
+            pagination_row = []
+            if previous_page_url:
+                try:
+                    query_params_prev = parse_qs(urlparse(previous_page_url).query)
+                    prev_page = query_params_prev.get('page', [None])[0] or '1'
+                    pagination_row.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"hist_page_{prev_page}"))
+                except Exception as e_pag_prev:
+                    logger.warning(f"Error parsing prev_page_url: {e_pag_prev}")
+            if next_page_url:
+                try:
+                    query_params_next = parse_qs(urlparse(next_page_url).query)
+                    next_page = query_params_next.get('page', [None])[0]
+                    if next_page: pagination_row.append(
+                        InlineKeyboardButton("Keyingi ➡️", callback_data=f"hist_page_{next_page}"))
+                except Exception as e_pag_next:
+                    logger.warning(f"Error parsing next_page_url: {e_pag_next}")
+            if pagination_row:
+                keyboard_list.append(pagination_row)
+            if keyboard_list:
+                final_markup = InlineKeyboardMarkup(keyboard_list)
+        logger.info("BACK_BTN_LOG: History formatted.")  # LOG 8
+    else:
+        error_detail = history_response.get('detail', 'API Xatoligi') if history_response else 'Network Xatoligi'
+        final_text = f"Tarixni yuklashda xatolik: {error_detail}" if lang_code == 'uz' else f"Ошибка загрузки истории: {error_detail}"
+        logger.error(f"BACK_BTN_LOG: Failed to fetch/process history: {final_text}")  # LOG 9 (Xatolik holati)
+
+    if sent_loading_message and sent_loading_message.message_id:
+        try:
+            logger.info(
+                f"BACK_BTN_LOG: Attempting to edit message ID {sent_loading_message.message_id} with final history content.")  # LOG 10
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=sent_loading_message.message_id,
+                text=final_text,
+                reply_markup=final_markup,
+                parse_mode=ParseMode.HTML
+            )
+            logger.info("BACK_BTN_LOG: Successfully edited message with history.")  # LOG 11
+        except Exception as e:
+            logger.error(f"BACK_BTN_LOG: Error editing history message: {e}", exc_info=True)  # LOG 12 (Xatolik holati)
+            try:
+                logger.info("BACK_BTN_LOG: Attempting to delete loading message and send new as fallback.")  # LOG 13
+                await context.bot.delete_message(chat_id=chat_id, message_id=sent_loading_message.message_id)
+                await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=final_markup,
+                                               parse_mode=ParseMode.HTML)
+                logger.info("BACK_BTN_LOG: Sent new history message as fallback.")  # LOG 14
+            except Exception as fallback_e:
+                logger.error(f"BACK_BTN_LOG: CRITICAL - Failed to send history as fallback: {fallback_e}",
+                             exc_info=True)  # LOG 15
+    else:
+        logger.error(
+            "BACK_BTN_LOG: 'sent_loading_message' was None or had no ID, cannot edit. Sending new message.")  # LOG 16
+        await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=final_markup,
+                                       parse_mode=ParseMode.HTML)
+
+
 async def order_detail_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """ "Batafsil" (order_{id}) tugmasi bosilganda ishlaydi."""
     query = update.callback_query
@@ -484,49 +610,3 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except (IndexError, ValueError, TypeError) as e:
         logger.warning(f"Invalid cancel order callback: {query.data} - {e}")
         await query.answer("Xatolik!", show_alert=True)
-
-
-async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ "Ortga (Tarix)" (back_to_history) tugmasi bosilganda ishlaydi."""
-    query = update.callback_query
-    await query.answer()  # Tugma bosilganini tasdiqlaymiz
-    user_id = query.from_user.id
-    chat_id = update.effective_chat.id  # Chat ID ni olamiz
-    lang_code = get_user_lang(context)
-    logger.info(f"User {user_id} requested back to history")
-
-    # --- Avvalgi xabarni o'chiramiz ---
-    try:
-        await query.delete_message()
-        logger.info(f"Deleted previous message (order detail) for user {user_id}")
-    except Exception as e:
-        # Agar o'chirishda xato bo'lsa ham, davom etamiz (balki xabar allaqachon yo'qdir)
-        logger.warning(f"Could not delete message on back_to_history: {e}")
-    # ----------------------------------
-
-    # Tarixning birinchi sahifasini qayta yuklaymiz va YANGI XABAR yuboramiz
-    loading_text = "Tarix yuklanmoqda..." if lang_code == 'uz' else "Загрузка истории..."
-    # Yangi "loading" xabarini yuborish shart emas, darhol tarixni yuklaymiz
-
-    history_response = await make_api_request(context, 'GET', 'orders/history/', user_id, params={'page': 1})
-
-    # show_order_history ni chaqiramiz, lekin unga edit qilish uchun update o'rniga None beramiz
-    # yoki show_order_history ni o'zgartirib, yangi xabar yuborish imkonini beramiz.
-    # Hozircha eng osoni show_order_history logikasini qisman qaytarish:
-
-    if history_response and not history_response.get('error'):
-        # show_order_history funksiyasini chaqiramiz, lekin u endi
-        # query.edit_message_text qila olmaydi (chunki xabar o'chirildi).
-        # Shuning uchun u yangi xabar yuborishi kerak. show_order_history ni
-        # shunga moslash kerak yoki bu yerda qayta formatlash kerak.
-
-        # Keling, show_order_history ni chaqiramiz, u xatolikni ushlab,
-        # yangi xabar yuborishga harakat qiladi deb umid qilamiz.
-        # Muhim: show_order_history (#195 dagi) ichidagi edit_message_text
-        # xatolik bersa, yangi xabar yuboradigan fallback logikasi bor edi.
-        await show_order_history(update, context, history_response)
-
-    else:  # API xatoligi
-        error_detail = history_response.get('detail', 'N/A') if history_response else 'N/A'
-        error_text = f"Tarixni yuklashda xatolik: {error_detail}"
-        await context.bot.send_message(chat_id=chat_id, text=error_text)
