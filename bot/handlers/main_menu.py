@@ -3,7 +3,9 @@ import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
+from .branch import show_branch_list_menu
 from .order import show_order_history
+from .profile import show_user_profile
 from ..config import MAIN_MENU
 from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request  # API client kerak
@@ -67,13 +69,13 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await update.message.reply_text(reply_text)
         return next_state  # MAIN_MENU da qolamiz
     elif message_text in ["📍 Filiallar", "📍 Филиалы"]:
-        reply_text = "Filiallar ro'yxati..." if lang_code == 'uz' else "Список филиалов..."
-        # TODO: Implement show_branch_list function call here (from ??? maybe common or menu_browse?)
-        pass  # Hozircha placeholder
+        await show_branch_list_menu(update, context)  # <-- Yangi funksiyani chaqiramiz
+        return next_state  # MAIN_MENU da qolamiz
+
     elif message_text in ["👤 Profil", "👤 Профиль"]:
         reply_text = "Profil ma'lumotlari..." if lang_code == 'uz' else "Данные профиля..."
-        # TODO: Implement show_profile function call here (from .profile)
-        pass  # Hozircha placeholder
+        await show_user_profile(update, context)  # <-- Yangi funksiyani chaqiramiz
+        return next_state  # MAIN_MENU da qolamiz
     elif message_text in ["⚙️ Sozlamalar", "⚙️ Настройки"]:
         reply_text = "Tilni o'zgartirish uchun /start buyrug'ini qayta bosing." \
             if lang_code == 'uz' else \

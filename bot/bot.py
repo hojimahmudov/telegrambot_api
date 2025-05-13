@@ -51,7 +51,7 @@ from .handlers.callbacks import (
     add_to_cart_callback, quantity_noop_callback, back_button_callback,
     start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
     cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback,
-    cancel_order_callback, back_to_history_callback
+    cancel_order_callback, back_to_history_callback, branch_location_callback
 )
 
 # Logging
@@ -84,6 +84,7 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(add_to_cart_callback, pattern='^add_', block=False))
     application.add_handler(CallbackQueryHandler(quantity_noop_callback, pattern='^p_noop_', block=False))
     application.add_handler(CallbackQueryHandler(quantity_noop_callback, pattern='^p_info_', block=False))
+    application.add_handler(CallbackQueryHandler(back_to_history_callback, pattern='^back_to_history$', block=False))
     application.add_handler(CallbackQueryHandler(back_button_callback, pattern='^back_to_', block=False))
     # application.add_handler(CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$', block=False))
     application.add_handler(
@@ -93,8 +94,8 @@ def main() -> None:
     application.add_handler(CallbackQueryHandler(cart_refresh_callback, pattern='^cart_refresh$', block=False))
     application.add_handler(CallbackQueryHandler(order_detail_callback, pattern='^order_', block=False))
     application.add_handler(CallbackQueryHandler(history_page_callback, pattern='^hist_page_', block=False))
-    application.add_handler(CallbackQueryHandler(cancel_order_callback, pattern='^cancel_order_'))
-    application.add_handler(CallbackQueryHandler(back_to_history_callback, pattern='^back_to_history$'))
+    application.add_handler(CallbackQueryHandler(cancel_order_callback, pattern='^cancel_order_', block=False))
+    application.add_handler(CallbackQueryHandler(branch_location_callback, pattern='^branch_loc_', block=False))
 
     # 3. Asosiy ConversationHandler (persistent=True va per_message=False bilan)
     conv_handler = ConversationHandler(

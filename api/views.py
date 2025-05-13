@@ -593,11 +593,11 @@ class OrderCancelView(APIView):
             )
 
 
-class BranchListView(generics.ListAPIView):
+class BranchViewSet(viewsets.ReadOnlyModelViewSet):  # <-- ListAPIView o'rniga
     """
-    Barcha aktiv filiallar ro'yxatini qaytaradi.
-    Har bir filial uchun ish vaqtlari va hozirgi ochiq/yopiqlik statusi ham qo'shiladi.
+    Barcha aktiv filiallar ro'yxatini va bitta filialni ID bo'yicha olish uchun.
     """
-    queryset = Branch.objects.filter(is_active=True).prefetch_related('working_hours')  # Faqat aktiv filiallar
+    queryset = Branch.objects.filter(is_active=True).prefetch_related('working_hours')
     serializer_class = BranchSerializer
-    permission_classes = [permissions.AllowAny]  # Filiallar ro'yxati hammaga ochiq
+    permission_classes = [permissions.AllowAny]
+    # lookup_field = 'pk' # Bu standart, shart emas

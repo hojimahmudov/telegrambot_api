@@ -23,100 +23,47 @@ logger = logging.getLogger(__name__)
 async def cart_quantity_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Savatdagi mahsulot sonini o'zgartirish uchun +/- tugmalarini boshqaradi."""
     query = update.callback_query
-    # Avval tugma bosilganiga javob beramiz (loading indikatorni olib tashlash uchun)
-    # Xabar keyinroq, API javobidan keyin chiqadi
-    await query.answer()
-
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
 
     try:
         parts = query.data.split('_')  # Masalan: ['cart', 'incr', 'item_id']
-        action = parts[1]  # 'incr' yoki 'decr'
+        action_type = parts[1]  # 'incr' yoki 'decr'
         item_id = int(parts[2])
     except (IndexError, ValueError, TypeError):
-        logger.warning(f"Invalid cart quantity callback data: {query.data}")
-        await query.answer("Xatolik!", show_alert=True)  # Qisqa xatolik alerti
+        logger.warning(f"Invalid cart quantity callback data: {query.data} for user {user_id}")
+        await query.answer("Xatolik: Noto'g'ri so'rov.", show_alert=True)
         return
 
-    logger.info(f"User {user_id} requested {action} for cart item {item_id}")
+    # Foydalanuvchiga darhol javob (loading state)
+    processing_text = "Bajarilmoqda..." if lang_code == 'uz' else "Обработка..."
+    await query.answer(processing_text)
 
-    change = 1 if action == 'incr' else -1
+    logger.info(f"User {user_id} requested {action_type} for cart item {item_id}")
 
-    # 1. Joriy miqdorni bilish uchun avval savatni API dan olamiz
-    # (Balki keyinchalik optimallashtirish mumkin, lekin hozircha shunday)
-    cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
-    if not cart_response or cart_response.get('error'):
-        error_text = "Savat ma'lumotlarini olib bo'lmadi." if lang_code == 'uz' else "Не удалось получить данные корзины."
-        # Bu yerda xabarni tahrirlash o'rniga yangi xabar yuborish yaxshiroq
-        await context.bot.send_message(chat_id=user_id, text=error_text)
-        return
+    change = 1 if action_type == 'incr' else -1
 
-    current_quantity = 0
-    items = cart_response.get('items', [])
-    for item in items:
-        if item.get('id') == item_id:
-            current_quantity = item.get('quantity', 0)
-            break
-
-    if current_quantity == 0:
-        logger.warning(f"Cart item {item_id} not found for user {user_id} during quantity change.")
-        # Foydalanuvchi eski xabardagi tugmani bosgan bo'lishi mumkin, savatni yangilaymiz
-        await show_cart(update, context, cart_response)
-        return
-
-    # 2. Yangi miqdorni hisoblaymiz
-    new_quantity = current_quantity
-    if action == 'incr':
-        new_quantity += 1
-    elif action == 'decr':
-        new_quantity -= 1
-
-    # 3. Minimal miqdorni tekshiramiz (0 dan kichik bo'lsa nima qilish kerak?)
-    if new_quantity < 1:
-        # Variant 1: Shunchaki minimal 1 da qoldirish
-        # new_quantity = 1
-        # Variant 2: Agar 1 dan kamaysa, o'chirish (DELETE) logikasini chaqirish
-        logger.info(f"Quantity for item {item_id} reached zero via decrement. Deleting item.")
-        # await cart_item_delete_callback(update, context) # Bu to'g'ridan-to'g'ri ishlamasligi mumkin
-        # Yaxshisi, DELETE API ni chaqiramiz
-        delete_data = {"item_id": item_id}
-        delete_response = await make_api_request(context, 'DELETE', 'cart/', user_id, data=delete_data)
-        # Natijadan qat'iy nazar savatni yangilaymiz
-        refreshed_cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
-        if refreshed_cart_response and not refreshed_cart_response.get('error'):
-            await show_cart(update, context, refreshed_cart_response)
-        # Agar miqdor 0 ga tushganda o'chirilsa, shu yerda funksiyadan chiqamiz
-        return
-
-    # 4. PATCH API ni chaqiramiz (agar o'chirilmagan bo'lsa)
     update_data = {"item_id": item_id, "change": change}
-    update_response = await make_api_request(context, 'PATCH', 'cart/', user_id, data=update_data)
+    api_response = await make_api_request(context, 'PATCH', 'cart/', user_id, data=update_data)
 
-    # 5. Savat ko'rinishini yangilaymiz
-    if update_response and not update_response.get('error'):
-        logger.info(f"Successfully updated quantity for item {item_id} to {new_quantity}")
-        # API dan eng so'nggi savat holatini olamiz
-        refreshed_cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
-        if refreshed_cart_response and not refreshed_cart_response.get('error'):
-            await show_cart(update, context, refreshed_cart_response)  # show_cart xabarni tahrirlaydi
-        else:
-            error_text = "Savatni yangilashda xatolik."  # ...
-            try:
-                await query.edit_message_text(error_text)
-            except:
-                await context.bot.send_message(chat_id=user_id, text=error_text)
+    if api_response and not api_response.get('error'):
+        logger.info(f"Successfully processed quantity change for item {item_id}. Refreshing cart.")
+        await show_cart(update, context, api_response)  # API javobidagi savatni ko'rsatamiz
+        # query.answer() yuqorida chaqirilgan, bu yerda muvaffaqiyat haqida qo'shimcha alert shart emas
+    elif api_response and api_response.get('status_code') == 401:
+        logger.warning(f"Unauthorized quantity change for user {user_id}, item {item_id}.")
+        # make_api_request xabar yuborgan bo'lishi kerak
     else:
-        error_detail = update_response.get('detail', 'N/A') if update_response else 'N/A'
-        error_text = f"Miqdorni yangilashda xatolik: {error_detail[:100]}"
-        await query.answer(error_text, show_alert=True)  # Xatolikni alert qilamiz
+        error_detail = api_response.get('detail',
+                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
+        logger.error(f"Failed to update quantity for item {item_id}, user {user_id}: {error_detail}")
+        error_text_alert = "Xatolik yuz berdi!" if lang_code == 'uz' else "Произошла ошибка!"
+        await query.answer(error_text_alert, show_alert=True)
 
 
 async def cart_item_delete_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Savatdagi mahsulotni o'chirish (🗑️) tugmasini boshqaradi."""
     query = update.callback_query
-    await query.answer("O'chirilmoqda...")
-
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
 
@@ -124,34 +71,37 @@ async def cart_item_delete_callback(update: Update, context: ContextTypes.DEFAUL
         parts = query.data.split('_')  # Masalan: ['cart', 'del', 'item_id']
         item_id = int(parts[2])
     except (IndexError, ValueError, TypeError):
-        logger.warning(f"Invalid cart delete callback data: {query.data}")
-        await query.answer("Xatolik!", show_alert=True)
+        logger.warning(f"Invalid cart delete callback data: {query.data} for user {user_id}")
+        await query.answer("Xatolik: Noto'g'ri so'rov.", show_alert=True)
         return
+
+    deleting_text = "O'chirilmoqda..." if lang_code == 'uz' else "Удаление..."
+    await query.answer(deleting_text)  # Darhol javob
 
     logger.info(f"User {user_id} requested delete for cart item {item_id}")
 
-    # DELETE API ni chaqiramiz
     delete_data = {"item_id": item_id}
-    delete_response = await make_api_request(context, 'DELETE', 'cart/', user_id, data=delete_data)
+    api_response = await make_api_request(context, 'DELETE', 'cart/', user_id, data=delete_data)
 
-    # API javobidan qat'iy nazar (muvaffaqiyatli yoki 404 - topilmadi), savatni yangilaymiz
-    # Chunki agar 404 bo'lsa ham, demak item allaqachon yo'q, foydalanuvchi yangi holatni ko'rishi kerak
-    if delete_response and (not delete_response.get('error') or delete_response.get('status_code') == 404):
-        logger.info(
-            f"Delete request for item {item_id} processed (Status: {delete_response.get('status_code')}). Refreshing cart.")
-        refreshed_cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
-        if refreshed_cart_response and not refreshed_cart_response.get('error'):
-            await show_cart(update, context, refreshed_cart_response)  # show_cart xabarni tahrirlaydi
+    if api_response and not api_response.get('error'):
+        logger.info(f"Delete request for item {item_id} processed. Refreshing cart.")
+        await show_cart(update, context, api_response)
+    elif api_response and api_response.get('status_code') == 401:
+        logger.warning(f"Unauthorized delete for user {user_id}, item {item_id}.")
+    elif api_response and api_response.get('status_code') == 404:  # Mahsulot allaqachon yo'q
+        logger.info(f"Item {item_id} not found for delete, likely already gone. Refreshing cart.")
+        current_cart_data = await make_api_request(context, 'GET', 'cart/', user_id)
+        if current_cart_data and not current_cart_data.get('error'):
+            await show_cart(update, context, current_cart_data)
         else:
-            error_text = "Savatni yangilashda xatolik."  # ...
-            try:
-                await query.edit_message_text(error_text)
-            except:
-                await context.bot.send_message(chat_id=user_id, text=error_text)
-    else:  # Agar DELETE so'rovida boshqa xatolik bo'lsa
-        error_detail = delete_response.get('detail', 'N/A') if delete_response else 'N/A'
-        error_text = f"O'chirishda xatolik: {error_detail[:100]}"
-        await query.answer(error_text, show_alert=True)
+            error_text = "Savatni yangilab bo'lmadi."  # ...
+            await context.bot.send_message(chat_id=user_id, text=error_text)  # Yangi xabar
+    else:
+        error_detail = api_response.get('detail',
+                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
+        logger.error(f"Failed to delete item {item_id} for user {user_id}: {error_detail}")
+        error_text_alert = "O'chirishda xatolik!" if lang_code == 'uz' else "Ошибка удаления!"
+        await query.answer(error_text_alert, show_alert=True)
 
 
 async def cart_info_noop_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -161,20 +111,23 @@ async def cart_info_noop_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def cart_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles the 'Refresh' button in the cart view."""
     query = update.callback_query
-    await query.answer("Savat yangilanmoqda...")
     user_id = query.from_user.id
-    # Re-fetch and re-display the cart
+    lang_code = get_user_lang(context)
+    refreshing_text = "Savat yangilanmoqda..." if lang_code == 'uz' else "Обновление корзины..."
+    await query.answer(refreshing_text)
+
+    logger.info(f"User {user_id} requested cart refresh.")
     cart_response = await make_api_request(context, 'GET', 'cart/', user_id)
     if cart_response and not cart_response.get('error'):
-        # Need to import show_cart here as well
-        from .cart import show_cart
-        # Edit the existing message with the new cart data
-        await show_cart(update, context, cart_response)  # show_cart needs to handle edits
+        await show_cart(update, context, cart_response)
+    elif cart_response and cart_response.get('status_code') == 401:
+        pass  # make_api_request xabar bergan
     else:
         error_detail = cart_response.get('detail', 'N/A') if cart_response else 'N/A'
-        await query.answer(f"Yangilashda xatolik: {error_detail}", show_alert=True)
+        error_text_alert = "Yangilashda xatolik!" if lang_code == 'uz' else "Ошибка обновления!"
+        await query.answer(error_text_alert, show_alert=True)
+        logger.warning(f"Failed to refresh cart for user {user_id}: {error_detail}")
 
 
 # Kategoriya tanlandi
@@ -372,44 +325,28 @@ async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_
 
 
 async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """ "Ortga (Tarix)" (back_to_history) tugmasi bosilganda ishlaydi."""
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
     chat_id = update.effective_chat.id
     lang_code = get_user_lang(context)
-    logger.info(f"BACK_BTN_LOG: User {user_id} requested back to history.")  # LOG 1
+    logger.info(f"User {user_id} requested back to order history.")
 
     try:
         await query.delete_message()
-        logger.info(f"BACK_BTN_LOG: Deleted previous message for user {user_id}")  # LOG 2
     except Exception as e:
-        logger.warning(f"BACK_BTN_LOG: Could not delete previous message: {e}")
+        logger.warning(f"Could not delete previous message on back_to_history: {e}")
 
+    # "Yuklanmoqda..." xabarini yuborish (foydalanuvchiga feedback uchun)
     loading_text = "Buyurtmalar tarixi yuklanmoqda..." if lang_code == 'uz' else "Загрузка истории заказов..."
-    sent_loading_message = None
-    try:
-        logger.info("BACK_BTN_LOG: Attempting to send 'Loading history...' message.")  # LOG 3
-        sent_loading_message = await context.bot.send_message(chat_id=chat_id, text=loading_text)
-        if sent_loading_message:
-            logger.info(
-                f"BACK_BTN_LOG: Sent 'Loading history...' message with ID {sent_loading_message.message_id}.")  # LOG 4
-        else:
-            logger.error("BACK_BTN_LOG: context.bot.send_message returned None for loading message.")
-            return
-    except Exception as e:
-        logger.error(f"BACK_BTN_LOG: CRITICAL - Failed to send 'Loading history...' message: {e}", exc_info=True)
-        return
+    sent_loading_message = await context.bot.send_message(chat_id=chat_id, text=loading_text)
 
-    logger.info("BACK_BTN_LOG: Attempting to fetch order history from API (page 1).")  # LOG 5
     history_response = await make_api_request(context, 'GET', 'orders/history/', user_id, params={'page': 1})
-    logger.info(f"BACK_BTN_LOG: API response for history: {history_response}")  # LOG 6
 
-    final_text = "Xatolik yuz berdi."  # Standart xato matni
+    final_text = ""
     final_markup = None
 
     if history_response and not history_response.get('error'):
-        logger.info("BACK_BTN_LOG: API response OK. Formatting history.")  # LOG 7
         orders = history_response.get('results', [])
         count = history_response.get('count', 0)
         next_page_url = history_response.get('next')
@@ -429,8 +366,7 @@ async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT
                 try:
                     dt_obj = datetime.datetime.fromisoformat(str(created_at).replace('Z', '+00:00'))
                     formatted_date = timezone.localtime(dt_obj).strftime('%Y-%m-%d %H:%M')
-                except Exception as e_date:
-                    logger.warning(f"BACK_BTN_LOG: Error formatting date '{created_at}': {e_date}")
+                except:
                     formatted_date = str(created_at)[:10]
                 total = order.get('total_price', 'N/A')
 
@@ -445,52 +381,32 @@ async def back_to_history_callback(update: Update, context: ContextTypes.DEFAULT
                     query_params_prev = parse_qs(urlparse(previous_page_url).query)
                     prev_page = query_params_prev.get('page', [None])[0] or '1'
                     pagination_row.append(InlineKeyboardButton("⬅️ Oldingi", callback_data=f"hist_page_{prev_page}"))
-                except Exception as e_pag_prev:
-                    logger.warning(f"Error parsing prev_page_url: {e_pag_prev}")
+                except:
+                    pass  # Xatolik bo'lsa tugma qo'shilmaydi
             if next_page_url:
                 try:
                     query_params_next = parse_qs(urlparse(next_page_url).query)
                     next_page = query_params_next.get('page', [None])[0]
                     if next_page: pagination_row.append(
                         InlineKeyboardButton("Keyingi ➡️", callback_data=f"hist_page_{next_page}"))
-                except Exception as e_pag_next:
-                    logger.warning(f"Error parsing next_page_url: {e_pag_next}")
-            if pagination_row:
-                keyboard_list.append(pagination_row)
-            if keyboard_list:
-                final_markup = InlineKeyboardMarkup(keyboard_list)
-        logger.info("BACK_BTN_LOG: History formatted.")  # LOG 8
+                except:
+                    pass
+            if pagination_row: keyboard_list.append(pagination_row)
+            if keyboard_list: final_markup = InlineKeyboardMarkup(keyboard_list)
     else:
         error_detail = history_response.get('detail', 'API Xatoligi') if history_response else 'Network Xatoligi'
         final_text = f"Tarixni yuklashda xatolik: {error_detail}" if lang_code == 'uz' else f"Ошибка загрузки истории: {error_detail}"
-        logger.error(f"BACK_BTN_LOG: Failed to fetch/process history: {final_text}")  # LOG 9 (Xatolik holati)
+        logger.error(f"Failed to fetch/process history for back_button: {final_text}")
 
-    if sent_loading_message and sent_loading_message.message_id:
-        try:
-            logger.info(
-                f"BACK_BTN_LOG: Attempting to edit message ID {sent_loading_message.message_id} with final history content.")  # LOG 10
-            await context.bot.edit_message_text(
-                chat_id=chat_id,
-                message_id=sent_loading_message.message_id,
-                text=final_text,
-                reply_markup=final_markup,
-                parse_mode=ParseMode.HTML
-            )
-            logger.info("BACK_BTN_LOG: Successfully edited message with history.")  # LOG 11
-        except Exception as e:
-            logger.error(f"BACK_BTN_LOG: Error editing history message: {e}", exc_info=True)  # LOG 12 (Xatolik holati)
-            try:
-                logger.info("BACK_BTN_LOG: Attempting to delete loading message and send new as fallback.")  # LOG 13
-                await context.bot.delete_message(chat_id=chat_id, message_id=sent_loading_message.message_id)
-                await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=final_markup,
-                                               parse_mode=ParseMode.HTML)
-                logger.info("BACK_BTN_LOG: Sent new history message as fallback.")  # LOG 14
-            except Exception as fallback_e:
-                logger.error(f"BACK_BTN_LOG: CRITICAL - Failed to send history as fallback: {fallback_e}",
-                             exc_info=True)  # LOG 15
-    else:
-        logger.error(
-            "BACK_BTN_LOG: 'sent_loading_message' was None or had no ID, cannot edit. Sending new message.")  # LOG 16
+    # "Yuklanmoqda..." xabarini tahrirlaymiz
+    try:
+        await context.bot.edit_message_text(
+            chat_id=chat_id, message_id=sent_loading_message.message_id,
+            text=final_text, reply_markup=final_markup, parse_mode=ParseMode.HTML
+        )
+    except Exception as e:  # Agar tahrirlashda xato bo'lsa (masalan, xabar o'chirilgan bo'lsa)
+        logger.error(f"Error editing history message in back_button_callback: {e}", exc_info=True)
+        # Yangi xabar yuboramiz
         await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=final_markup,
                                        parse_mode=ParseMode.HTML)
 
@@ -610,3 +526,47 @@ async def cancel_order_callback(update: Update, context: ContextTypes.DEFAULT_TY
     except (IndexError, ValueError, TypeError) as e:
         logger.warning(f"Invalid cancel order callback: {query.data} - {e}")
         await query.answer("Xatolik!", show_alert=True)
+
+
+async def branch_location_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ "Xaritada ko'rish" (branch_loc_{id}) tugmasi bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    try:
+        if not query.data or not query.data.startswith('branch_loc_'): raise ValueError("Invalid callback")
+        branch_id = int(query.data.split('_')[-1])
+        logger.info(f"User {user_id} requested location for branch ID: {branch_id}")
+
+        # API dan filial detallarini (ayniqsa lat/lon) olamiz
+        # Yoki BranchSerializer javobida lat/lon bo'lsa, uni callback_data orqali yuborish ham mumkin
+        # Hozircha API dan qayta so'raymiz (agar BranchSerializerda yo'q bo'lsa)
+        branch_detail_response = await make_api_request(context, 'GET', f'branches/{branch_id}/',
+                                                        user_id)  # Token shart emas
+
+        if branch_detail_response and not branch_detail_response.get('error'):
+            branch = branch_detail_response
+            latitude = branch.get('latitude')
+            longitude = branch.get('longitude')
+            branch_name = branch.get('name', 'Filial')
+
+            if latitude is not None and longitude is not None:
+                await context.bot.send_message(chat_id=user_id, text=f"📍 {branch_name}:")
+                await context.bot.send_location(
+                    chat_id=user_id,
+                    latitude=latitude,
+                    longitude=longitude
+                )
+            else:
+                no_loc_text = "Bu filial uchun lokatsiya kiritilmagan." if lang_code == 'uz' else "Для этого филиала не указана локация."
+                await context.bot.send_message(chat_id=user_id, text=no_loc_text)
+        else:
+            error_detail = branch_detail_response.get('detail', 'N/A') if branch_detail_response else 'N/A'
+            error_text = f"Filial ma'lumotini olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить данные филиала: {error_detail}"
+            await context.bot.send_message(chat_id=user_id, text=error_text)
+
+    except (IndexError, ValueError, TypeError) as e:
+        logger.warning(f"Invalid branch location callback: {query.data} - {e}")
+        await context.bot.send_message(chat_id=user_id, text="Xatolik.")

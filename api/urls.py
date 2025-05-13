@@ -5,7 +5,7 @@ from rest_framework.routers import DefaultRouter
 from .views import (
     CategoryViewSet, ProductViewSet, UserProfileView,
     RegistrationView, OTPVerificationView, CartView, CheckoutView,
-    BranchListView, OrderHistoryView, OrderDetailView, OrderCancelView
+    BranchViewSet, OrderHistoryView, OrderDetailView, OrderCancelView
 )
 # simplejwt view'larini import qilamiz (token refresh uchun)
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -17,6 +17,7 @@ router = DefaultRouter()
 # router.register(prefix, viewset, basename)
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'products', ProductViewSet, basename='product')
+router.register(r'branches', BranchViewSet, basename='branch')
 
 # URL pattern'lari ro'yxati
 urlpatterns = [
@@ -40,8 +41,6 @@ urlpatterns = [
     path('cart/', CartView.as_view(), name='user-cart'),
     # Checkout Endpoint'i ---
     path('orders/checkout/', CheckoutView.as_view(), name='order-checkout'),
-    # Filiallar Endpoint'i ---
-    path('branches/', BranchListView.as_view(), name='branch-list'),
     # Buyurtmalar Tarixi Endpoint'i ---
     path('orders/history/', OrderHistoryView.as_view(), name='order-history'),
     # Buyurtma Tafsilotlari Endpoint'i ---
