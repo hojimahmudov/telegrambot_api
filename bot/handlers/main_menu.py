@@ -1,12 +1,13 @@
 # bot/handlers/main_menu.py
 import logging
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ContextTypes
 
 from .branch import show_branch_list_menu
 from .order import show_order_history
 from .profile import show_user_profile
-from ..config import MAIN_MENU
+from ..config import MAIN_MENU, SELECTING_LANG
+from ..keyboards import get_language_keyboard
 from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request  # API client kerak
 from .menu_browse import show_category_list
@@ -77,9 +78,11 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await show_user_profile(update, context)  # <-- Yangi funksiyani chaqiramiz
         return next_state  # MAIN_MENU da qolamiz
     elif message_text in ["⚙️ Sozlamalar", "⚙️ Настройки"]:
-        reply_text = "Tilni o'zgartirish uchun /start buyrug'ini qayta bosing." \
-            if lang_code == 'uz' else \
-            "Чтобы изменить язык, нажмите /start снова."
+        settings_text = "Tilni tanlang:" if lang_code == 'uz' else "Выберите язык:"
+        reply_markup = get_language_keyboard()  # Til tanlash klaviaturasini olamiz
+        await update.message.reply_text(settings_text, reply_markup=reply_markup)
+        next_state = SELECTING_LANG
+
     else:
         reply_text = "Noma'lum buyruq." if lang_code == 'uz' else "Неизвестная команда."
 

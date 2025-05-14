@@ -177,7 +177,7 @@ REST_FRAMEWORK = {
 
 # Simple JWT sozlamalari
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(days=355),  # Access token yashash muddati (masalan, 1 soat)
+    'ACCESS_TOKEN_LIFETIME': timedelta(days=350),  # Access token yashash muddati (masalan, 1 soat)
     'REFRESH_TOKEN_LIFETIME': timedelta(days=355),  # Refresh token yashash muddati (masalan, 1 kun)
     # Boshqa sozlamalar...
 }

@@ -17,14 +17,41 @@ logger = logging.getLogger(__name__)
 
 # /start buyrug'i
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Bot ishga tushganda yoki tilni o'zgartirish kerak bo'lganda birinchi ishlaydi."""
     user = update.effective_user
-    logger.info(f"User {user.id} ({user.first_name}) called /start.")
-    reply_markup = get_language_keyboard()
-    await update.message.reply_text(
-        "Iltimos, muloqot tilini tanlang / Пожалуйста, выберите язык общения:",
-        reply_markup=reply_markup
-    )
-    return SELECTING_LANG
+    user_id = user.id
+    logger.info(f"User {user_id} ({user.first_name}) called /start.")
+
+    # 1. user_data dan tilni tekshiramiz
+    lang_code = context.user_data.get('language_code')
+
+    if not lang_code:
+        # 2. Agar user_data da yo'q bo'lsa, va foydalanuvchi tizimga kirgan bo'lsa, profildan olamiz
+        token_data = await get_user_token_data(context, user_id)
+        if token_data:
+            logger.info(f"User {user_id} has token, attempting to fetch profile for language.")
+            profile_data = await make_api_request(context, 'GET', 'users/profile/', user_id)
+            if profile_data and not profile_data.get('error'):
+                db_lang = profile_data.get('language_code')
+                if db_lang:
+                    logger.info(f"Found language '{db_lang}' in profile for user {user_id}.")
+                    context.user_data['language_code'] = db_lang
+                    lang_code = db_lang
+
+    if lang_code:
+        # Agar til ma'lum bo'lsa, to'g'ridan-to'g'ri keyingi bosqichga o'tamiz
+        logger.info(f"User {user_id} already has language '{lang_code}'. Proceeding to auth check.")
+        # `update` callback_query emas, message bo'lishi mumkin. `check_auth_and_proceed` buni hisobga olishi kerak.
+        return await check_auth_and_proceed(update, context)  # update obyektini to'g'ri uzatamiz
+    else:
+        # Agar til hali ham noma'lum bo'lsa, so'raymiz
+        logger.info(f"Language not set for user {user_id}. Asking for language selection.")
+        reply_markup = get_language_keyboard()
+        await update.message.reply_text(
+            "Iltimos, muloqot tilini tanlang / Пожалуйста, выберите язык общения:",
+            reply_markup=reply_markup
+        )
+        return SELECTING_LANG
 
 
 # Til tanlash callback'i
@@ -32,18 +59,26 @@ async def set_language_callback(update: Update, context: ContextTypes.DEFAULT_TY
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
+
     lang_code = query.data.split('_')[-1]
     context.user_data['language_code'] = lang_code
     logger.info(f"User {user_id} selected language: {lang_code}")
 
-    confirmation_text = "Til tanlandi!" if lang_code == 'uz' else "Язык выбран!"
+    # Tilni DB ga darhol yozishga harakat qilamiz, agar user tizimga kirgan bo'lsa
+    token_data = await get_user_token_data(context, user_id)  # get_user_token_data mavjud bo'lishi kerak
+    if token_data:
+        logger.info(f"User {user_id} is authenticated, updating language in DB from language callback.")
+        await update_language_in_db(context, user_id, lang_code)
+
+    confirmation_text = "Til o'zgartirildi!" if lang_code == 'uz' else "Язык изменен!"
     try:
         await query.edit_message_text(text=confirmation_text)
     except Exception as e:
         logger.warning(f"Could not edit language selection message: {e}")
-        # await context.bot.send_message(chat_id=user_id, text=confirmation_text) # Ixtiyoriy
-    return await check_auth_and_proceed(update, context)
+        await context.bot.send_message(chat_id=user_id, text=confirmation_text)
 
+    # Endi check_auth_and_proceed ni chaqiramiz, u MAIN_MENU ga olib borishi kerak
+    return await check_auth_and_proceed(update, context)
 
 
 # Autentifikatsiyani tekshirish va davom etish

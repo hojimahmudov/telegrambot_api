@@ -15,7 +15,7 @@ from ..utils.helpers import get_user_lang
 from ..utils.api_client import make_api_request
 # Menyuni ko'rsatish funksiyalarini import qilamiz
 from .menu_browse import show_category_list, show_product_list
-from ..config import ASKING_DELIVERY_TYPE
+from ..config import ASKING_DELIVERY_TYPE, SELECTING_LANG
 
 logger = logging.getLogger(__name__)
 
