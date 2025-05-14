@@ -122,6 +122,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     telegram_id = user.id
     first_name = user.first_name
     last_name = user.last_name
+    telegram_username = user.username
     lang_code = get_user_lang(context)
     if not phone_number.startswith('+'): phone_number = '+' + phone_number
     logger.info(f"Received contact from {telegram_id}: {phone_number}")
@@ -129,6 +130,7 @@ async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     registration_data = {
         "telegram_id": telegram_id, "phone_number": phone_number,
         "first_name": first_name, "last_name": last_name or "",
+        "username": telegram_username
     }
     api_response = await make_api_request(context, 'POST', 'auth/register/', telegram_id, data=registration_data)
     if api_response and not api_response.get('error'):
