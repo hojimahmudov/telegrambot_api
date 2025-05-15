@@ -48,7 +48,7 @@ from .handlers.order import handle_delivery_type_selection, handle_branch_select
 from .handlers.main_menu import main_menu_dispatch
 from .handlers.callbacks import (
     category_selected_callback, product_selected_callback,
-    add_to_cart_callback, back_button_callback,
+     back_button_callback,
     start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
     cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback,
     cancel_order_callback, back_to_history_callback, branch_location_callback, product_detail_qty_change_callback,
@@ -88,7 +88,6 @@ def main() -> None:
         CallbackQueryHandler(product_detail_qty_info_callback, pattern='^pdetail_qtyinfo_', block=False))
     application.add_handler(
         CallbackQueryHandler(product_detail_add_to_cart_callback, pattern='^pdetail_add_', block=False))
-    application.add_handler(CallbackQueryHandler(add_to_cart_callback, pattern='^add_', block=False))
     application.add_handler(CallbackQueryHandler(back_to_history_callback, pattern='^back_to_history$', block=False))
     application.add_handler(CallbackQueryHandler(back_button_callback, pattern='^back_to_', block=False))
     # application.add_handler(CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$', block=False))

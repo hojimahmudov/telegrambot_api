@@ -133,90 +133,131 @@ async def cart_refresh_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Kategoriya tanlandi
 async def category_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Kategoriya tugmasi bosilganda ishlaydi, avvalgi xabarni o'chirib, mahsulot nomlari ro'yxatini chiqaradi."""
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Callbackga javob beramiz
     user_id = query.from_user.id
+    # lang_code = get_user_lang(context) # Agar show_product_list ichida ishlatilmasa, bu yerda shart emas
+
     try:
-        if not query.data or not query.data.startswith('cat_'): raise ValueError("Invalid callback data")
+        # Callback datadan kategoriya ID sini ajratib olamiz ('cat_<ID>')
+        if not query.data or not query.data.startswith('cat_'):
+            raise ValueError("Invalid callback data for category selection")
         category_id = int(query.data.split('_')[1])
-        logger.info(f"User {user_id} selected category ID: {category_id}")
-        await show_product_list(update, context, category_id)  # Mahsulot ro'yxatini ko'rsatamiz
     except (IndexError, ValueError, TypeError) as e:
         logger.warning(f"Invalid category callback data: {query.data} - Error: {e}")
+        # Xatolik haqida qisqa javob beramiz, xabarni tahrirlamaymiz
+        await query.answer("Xatolik: Noto'g'ri kategoriya tanlandi.", show_alert=True)
+        return
+
+    logger.info(f"User {user_id} selected category ID: {category_id} to view products.")
+
+    # --- AVVALGI XABARNI O'CHIRAMIZ ---
+    if query.message:  # Agar callback xabar bilan bog'liq bo'lsa
         try:
-            await query.edit_message_text("Xatolik: Noto'g'ri kategoriya.")
-        except Exception as edit_e:
-            logger.error(f"Failed edit on invalid cat data: {edit_e}")
+            await query.delete_message()
+            logger.info(f"Deleted category list message for user {user_id}")
+        except Exception as e:
+            # Agar o'chirishda xatolik bo'lsa (masalan, xabar juda eski), log yozamiz
+            logger.warning(f"Could not delete category list message: {e}")
+    # ---------------------------------
+
+    # Endi mahsulotlar ro'yxatini ko'rsatish uchun show_product_list ni chaqiramiz
+    # show_product_list o'zi yangi "Yuklanmoqda..." xabarini chiqaradi va keyin mahsulotlarni
+    await show_product_list(update, context, category_id)
 
 
 # Mahsulot tanlandi
 async def product_selected_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Mahsulot nomi tugmasi bosilganda ishlaydi."""
     query = update.callback_query
-    await query.answer()
+    await query.answer()  # Callbackga tez javob beramiz
     user_id = query.from_user.id
+    chat_id = update.effective_chat.id  # Chat ID ni olamiz
     lang_code = get_user_lang(context)
+
+    product_id_to_fetch = -1  # Standart noto'g'ri qiymat
     try:
-        if not query.data or not query.data.startswith('prod_'): raise ValueError("Invalid callback")
-        product_id = int(query.data.split('_')[1])
+        if not query.data or not query.data.startswith('prod_'):
+            raise ValueError("Invalid callback data for product selection")
+        product_id_to_fetch = int(query.data.split('_')[1])
     except (IndexError, ValueError, TypeError) as e:
         logger.warning(f"Invalid product callback data: {query.data} - Error: {e}")
-        await query.edit_message_text("Xatolik: Noto'g'ri mahsulot.")
+        # Xatolik haqida yangi xabar yuboramiz, chunki avvalgi xabar qanday ekanligi noma'lum
+        await context.bot.send_message(chat_id=chat_id, text="Xatolik: Noto'g'ri mahsulot tanlandi.")
         return
 
-    logger.info(f"User {user_id} selected product ID: {product_id} for detail view.")
+    logger.info(f"User {user_id} selected product ID: {product_id_to_fetch} for detail view.")
 
-    # Joriy kategoriya ID sini kontekstdan olamiz (Ortga tugmasi uchun)
-    # Bu current_category_id category_selected_callback'da o'rnatilgan bo'lishi kerak
-    category_id_for_back = context.user_data.get('current_category_id')
+    # 1. Avvalgi xabarni (mahsulotlar ro'yxati tugmalari bo'lgan) o'chiramiz
+    if query.message:
+        try:
+            await query.delete_message()
+            logger.info(f"Deleted product list message for user {user_id}")
+        except Exception as e:
+            logger.warning(f"Could not delete product list message: {e}")
 
-    # Kontekstga joriy mahsulot va miqdorni saqlaymiz (boshlang'ich 1)
-    context.user_data['product_detail_interaction'] = {
-        'product_id': product_id,
-        'quantity': 1,
-        'category_id': category_id_for_back  # Ortga tugmasi uchun
-    }
-
-    loading_text = "Mahsulot yuklanmoqda..." if lang_code == 'uz' else "Загрузка продукта..."
+    # 2. Yangi "Mahsulot yuklanmoqda..." xabarini yuboramiz
+    loading_text = "Mahsulot ma'lumotlari yuklanmoqda..." if lang_code == 'uz' else "Загрузка данных о продукте..."
+    sent_loading_msg = None
     try:
-        await query.edit_message_text(text=loading_text)
-    except Exception:
-        await context.bot.send_message(chat_id=user_id, text=loading_text)
+        sent_loading_msg = await context.bot.send_message(chat_id=chat_id, text=loading_text)
+    except Exception as e:
+        logger.error(f"Failed to send 'Loading product details...' message: {e}", exc_info=True)
+        return  # Agar bu xabarni ham yubora olmasak, davom etmaymiz
 
-    product_response = await make_api_request(context, 'GET', f'products/{product_id}/', user_id)
+    # 3. API dan mahsulot detallarini olamiz
+    product_response = await make_api_request(context, 'GET', f'products/{product_id_to_fetch}/', user_id)
 
+    # 4. Yuborilgan "Yuklanmoqda..." xabarini o'chiramiz
+    if sent_loading_msg:
+        try:
+            await context.bot.delete_message(chat_id=chat_id, message_id=sent_loading_msg.message_id)
+        except Exception as e:
+            logger.warning(f"Could not delete 'Loading product details...' message: {e}")
+
+    # 5. API javobini qayta ishlab, yakuniy mahsulot detallari xabarini yuboramiz
     if product_response and not product_response.get('error'):
         product = product_response
+        category_id_for_back = context.user_data.get('current_category_id')
+
+        # Kontekstga joriy mahsulot va miqdorni saqlaymiz
+        context.user_data['product_detail_interaction'] = {
+            'product_id': product_id_to_fetch,
+            'quantity': 1,  # Boshlang'ich miqdor
+            'category_id': category_id_for_back
+        }
+
         caption = f"<b>{product.get('name', 'Nomsiz')}</b>\n\n"
         description = product.get('description')
         if description: caption += f"<pre>{description}</pre>\n\n"
         caption += f"Narxi: {product.get('price', 'N/A')} so'm"
 
         reply_markup = get_product_detail_keyboard(
-            product_id=product_id,
+            product_id=product_id_to_fetch,
             category_id=category_id_for_back,
             quantity=1,  # Boshlang'ich miqdor
             lang_code=lang_code
         )
 
         photo_url = product.get('image_url')
-        try:
-            await query.delete_message()  # Eski (mahsulotlar ro'yxati) xabarni o'chiramiz
-        except:
-            pass
         if photo_url:
-            await context.bot.send_photo(chat_id=user_id, photo=photo_url, caption=caption, reply_markup=reply_markup,
-                                         parse_mode=ParseMode.HTML)
-        else:
-            await context.bot.send_message(chat_id=user_id, text=caption, reply_markup=reply_markup,
+            try:
+                await context.bot.send_photo(chat_id=chat_id, photo=photo_url, caption=caption,
+                                             reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+            except Exception as e_photo:
+                logger.error(f"Failed to send product photo {photo_url}: {e_photo}")
+                # Rasm bilan yuborib bo'lmasa, matn bilan yuboramiz
+                await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup,
+                                               parse_mode=ParseMode.HTML)
+        else:  # Rasm yo'q bo'lsa
+            await context.bot.send_message(chat_id=chat_id, text=caption, reply_markup=reply_markup,
                                            parse_mode=ParseMode.HTML)
-    else:
-        error_detail = product_response.get('detail', 'N/A') if product_response else 'N/A'
+    else:  # API Xatoligi
+        error_detail = product_response.get('detail',
+                                            'Noma\'lum xatolik') if product_response else 'Server bilan bog\'lanish xatosi'
         error_text = f"Mahsulot ma'lumotini olib bo'lmadi: {error_detail}" if lang_code == 'uz' else f"Не удалось получить данные продукта: {error_detail}"
-        # Agar loading xabarini tahrirlay olsak
-        if query.message:
-            await query.edit_message_text(text=error_text)
-        else:
-            await context.bot.send_message(chat_id=user_id, text=error_text)
+        await context.bot.send_message(chat_id=chat_id, text=error_text)
 
 
 async def product_detail_qty_change_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -267,92 +308,69 @@ async def product_detail_qty_info_callback(update: Update, context: ContextTypes
 
 async def product_detail_add_to_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
-    await query.answer("Savatga qo'shilmoqda...")
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
 
     interaction_data = context.user_data.get('product_detail_interaction')
     if not interaction_data:
-        logger.warning(f"No current_product_interaction for user {user_id} on add to cart.")
-        await query.answer("Xatolik, qayta urinib ko'ring!", show_alert=True)
+        logger.warning(f"No current_product_interaction for user {user_id} on pdetail_add.")
+        # Agar kontekst topilmasa, xatolik haqida qisqa alert beramiz
+        await query.answer("Xatolik yuz berdi, iltimos qaytadan urinib ko'ring.", show_alert=True)
         return
 
     product_id_from_context = interaction_data['product_id']
-    # Callback datadan ham product_id ni olamiz, solishtirish uchun
-    try:
+    category_id_for_back = interaction_data.get('category_id')  # Ortga qaytish uchun kategoriya IDsi
+
+    try:  # Callback datadan product_id ni olamiz, solishtirish uchun
         product_id_from_callback = int(query.data.split('_')[-1])
         if product_id_from_context != product_id_from_callback:
             logger.error(f"Mismatch product ID in context vs callback for user {user_id}")
-            await query.answer("Ichki xatolik!", show_alert=True)
+            await query.answer("Ichki tizim xatoligi!", show_alert=True)
             return
-    except:
+    except (IndexError, ValueError, TypeError):
         logger.error(f"Invalid product_id in callback data for pdetail_add: {query.data}")
-        await query.answer("Ichki xatolik (product_id)!", show_alert=True)
+        await query.answer("Ichki xatolik (mahsulot IDsi)!", show_alert=True)
         return
 
     quantity_to_add = interaction_data['quantity']
     logger.info(
         f"User {user_id} adding product {product_id_from_context} (qty: {quantity_to_add}) to cart from detail.")
 
+    # API ga savatga qo'shish so'rovini yuboramiz
     cart_data = {"product_id": product_id_from_context, "quantity": quantity_to_add}
     api_response = await make_api_request(context, 'POST', 'cart/', user_id, data=cart_data)
 
     if api_response and not api_response.get('error'):
         success_text = f"✅ {quantity_to_add} dona mahsulot savatga qo'shildi!" if lang_code == 'uz' else f"✅ {quantity_to_add} шт. товара добавлено в корзину!"
-        await query.answer(success_text, show_alert=True)
+        await query.answer(success_text, show_alert=True)  # Muvaffaqiyatli qo'shilganini alert qilamiz
 
-        # Miqdorni 1 ga qaytarib qo'yamiz va klaviaturani yangilaymiz
-        context.user_data['product_detail_interaction']['quantity'] = 1
-        reply_markup = get_product_detail_keyboard(
-            product_id=product_id_from_context,
-            category_id=interaction_data.get('category_id'),
-            quantity=1,
-            lang_code=lang_code
-        )
-        try:  # Xabarni tahrirlashga harakat qilamiz, caption o'zgarmaydi, faqat tugmalar
-            if query.message:  # Agar message mavjud bo'lsa
-                await query.edit_message_reply_markup(reply_markup=reply_markup)
-        except Exception as e:
-            logger.warning(f"Could not reset quantity on keyboard after pdetail_add: {e}")
-    else:
-        error_detail = api_response.get('detail', 'N/A') if api_response else 'N/A'
+        # --- Mahsulotlar ro'yxatiga qaytish logikasi ---
+        # Joriy 'product_detail_interaction' ni tozalaymiz, chunki bu ko'rinishdan chiqyapmiz
+        if 'product_detail_interaction' in context.user_data:
+            del context.user_data['product_detail_interaction']
+
+        if category_id_for_back:
+            logger.info(f"Returning to product list for category {category_id_for_back} after adding to cart.")
+            # Avvalgi (mahsulot detali) xabarini o'chiramiz
+            try:
+                if query.message: await query.delete_message()
+            except Exception as e:
+                logger.warning(f"Could not delete product detail message before showing product list: {e}")
+
+            # Mahsulotlar ro'yxatini ko'rsatamiz (show_product_list yangi xabar yuboradi)
+            await show_product_list(update, context, category_id_for_back)
+        else:
+            # Agar qandaydir sabab bilan kategoriya ID topilmasa, xatolik yoki asosiy menyu
+            logger.warning(f"No category_id found to return to product list for user {user_id}. Message not changed.")
+            # Bu holatda, shunchaki alert chiqqan bo'ladi, xabar o'zgarmaydi
+        # ------------------------------------------------------
+
+    else:  # API da xatolik
+        error_detail = api_response.get('detail',
+                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
         await query.answer(f"Xatolik: {error_detail[:100]}", show_alert=True)
 
 
-# Savatga qo'shish callback'i
-async def add_to_cart_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer("Savatga qo'shilmoqda...")
-    user_id = query.from_user.id
-    lang_code = get_user_lang(context)
-    try:
-        if not query.data or not query.data.startswith('add_'): raise ValueError("Invalid callback data")
-        product_id = int(query.data.split('_')[1])
-    except (IndexError, ValueError, TypeError) as e:
-        logger.warning(f"Invalid add_to_cart callback: {query.data} - {e}")
-        await query.answer("Xatolik!", show_alert=True)
-        return
-    logger.info(f"User {user_id} adding product {product_id} to cart")
-    cart_data = {"product_id": product_id, "quantity": 1}
-    # Savatga qo'shish uchun token kerak! make_api_request buni o'zi qo'shadi
-    api_response = await make_api_request(context, 'POST', 'cart/', user_id, data=cart_data)
-    if api_response and not api_response.get('error'):
-        success_text = "✅ Savatga qo'shildi!" if lang_code == 'uz' else "✅ Добавлено в корзину!"
-        await query.answer(success_text, show_alert=False)
-    else:
-        # Agar 401 kelsa, make_api_request log yozadi va None qaytaradi
-        if api_response and api_response.get('status_code') == 401:
-            # Foydalanuvchiga xabar berish kerak bo'lishi mumkin
-            await context.bot.send_message(chat_id=user_id,
-                                           text="Savatga qo'shish uchun tizimga qayta kiring (/start).")
-        else:
-            error_detail = api_response.get('detail', 'N/A') if api_response else 'N/A'
-            logger.warning(f"Failed add to cart for user {user_id}, product {product_id}: {error_detail}")
-            error_text = f"Xatolik: {error_detail[:100]}"
-            await query.answer(error_text, show_alert=True)
-
-
-# Ortga tugmasi callback'i
 async def back_button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     await query.answer()
