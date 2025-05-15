@@ -48,5 +48,29 @@ def get_phone_keyboard(lang_code: str) -> ReplyKeyboardMarkup:
     keyboard = [[KeyboardButton(button_text, request_contact=True)]]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
 
+
+def get_product_detail_keyboard(product_id: int, category_id: int | None, quantity: int,
+                                lang_code: str) -> InlineKeyboardMarkup:
+    """Mahsulot detallari sahifasi uchun inline klaviatura yaratadi."""
+    minus_button = InlineKeyboardButton("➖", callback_data=f"pdetail_decr_{product_id}")
+    # Miqdor tugmasi hozircha bosilmaydi, shunchaki ko'rsatadi
+    qty_button = InlineKeyboardButton(str(quantity), callback_data=f"pdetail_qty_{product_id}")
+    plus_button = InlineKeyboardButton("➕", callback_data=f"pdetail_incr_{product_id}")
+
+    add_cart_button_text = "🛒 Savatga" if lang_code == 'uz' else "🛒 В корзину"
+    # product_id ni add callbackiga ham qo'shamiz
+    add_cart_button = InlineKeyboardButton(add_cart_button_text, callback_data=f"pdetail_add_{product_id}")
+
+    back_button_text = "< Ortga" if lang_code == 'uz' else "< Назад"
+    back_button_callback = f"back_to_prod_list_{category_id}" if category_id else "back_to_categories"
+    back_button = InlineKeyboardButton(back_button_text, callback_data=back_button_callback)
+
+    keyboard = [
+        [minus_button, qty_button, plus_button],
+        [add_cart_button],
+        [back_button]
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
 # --- Boshqa klaviaturalar uchun funksiyalar shu yerga qo'shilishi mumkin ---
 # Masalan, kategoriya tugmalarini yasash, mahsulot tugmalarini yasash va h.k.
