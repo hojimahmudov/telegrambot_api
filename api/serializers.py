@@ -80,7 +80,7 @@ class RegistrationSerializer(serializers.Serializer):
     phone_number = serializers.CharField(required=True, max_length=20)
     first_name = serializers.CharField(required=True, max_length=150)
     last_name = serializers.CharField(required=False, allow_blank=True, max_length=150)
-    username = serializers.CharField(required=False, allow_blank=True, max_length=150)
+    username = serializers.CharField(required=False, allow_blank=True, allow_null=True, max_length=150)
 
     def validate_phone_number(self, value):
         """Telefon raqami formatini tekshirish (soddalashtirilgan misol)."""

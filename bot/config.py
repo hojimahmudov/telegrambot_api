@@ -15,9 +15,13 @@ if not BOT_TOKEN:
 API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000/api/v1/")
 
 # --- Holatlar (States) ---
-(SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
+(SELECTING_LANG, AUTH_CHECK,
+ CHOOSING_PHONE_METHOD,
+ WAITING_PHONE,
+ WAITING_MANUAL_PHONE,
+ WAITING_OTP, MAIN_MENU,
  ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES
- ) = range(10)
+ ) = range(12)
 # Agar kerak bo'lsa, boshqa holatlarni qo'shish mumkin, masalan CHECKOUT_STATE
 
 # --- Boshqa konstantalar (agar kerak bo'lsa) ---

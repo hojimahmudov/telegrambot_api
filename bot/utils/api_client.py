@@ -135,14 +135,18 @@ async def make_api_request(
 
 
 # Tilni DB ga yozish funksiyasi API call qilgani uchun shu yerda bo'lgani mantiqiyroq
-async def update_language_in_db(context: ContextTypes.DEFAULT_TYPE, user_id: int, lang_code: str):
-    logger.info(f"Attempting to update language to '{lang_code}' in DB for user {user_id}")
+async def update_language_in_db_api(context: ContextTypes.DEFAULT_TYPE, user_id: int, lang_code: str) -> bool:
+    """Foydalanuvchi tilini API orqali backendda yangilaydi."""
+    logger.info(f"Attempting to update language to '{lang_code}' in API for user {user_id}")
     profile_update_data = {"language_code": lang_code}
     api_response = await make_api_request(context, 'PATCH', 'users/profile/', user_id, data=profile_update_data)
+
     if api_response and not api_response.get('error'):
-        logger.info(f"Successfully updated language preference in DB for user {user_id}")
+        logger.info(f"Successfully updated language in API for user {user_id}")
+        return True
     else:
-        logger.warning(f"Failed to update language preference in DB for user {user_id}. Response: {api_response}")
+        logger.warning(f"Failed to update language in API for user {user_id}. Response: {api_response}")
+        return False
 
 
 async def close_api_client():

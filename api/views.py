@@ -6,6 +6,7 @@ from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
+from .tasks import send_otp_telegram_task
 from .utils import send_telegram_otp, logger
 from django.utils import timezone
 import random
@@ -120,7 +121,7 @@ class RegistrationView(APIView):
                     {"error": "Bu Telegram ID allaqachon boshqa raqam bilan ro'yxatdan o'tgan."},
                     status=status.HTTP_400_BAD_REQUEST
                 )
-
+            user_instance_was_found = False
             try:
                 # Telefon raqami bo'yicha foydalanuvchini qidiramiz
                 user = User.objects.get(phone_number=phone_number)
@@ -132,6 +133,7 @@ class RegistrationView(APIView):
                     )
                 # Agar aktiv bo'lmasa (oldingi tugallanmagan ro'yxatdan o'tish),
                 # ma'lumotlarini yangilab, yangi OTP yuboramiz
+                user_instance_was_found = True
                 user.telegram_id = telegram_id
                 user.first_name = validated_data.get('first_name', user.first_name)
                 user.last_name = validated_data.get('last_name', user.last_name)
@@ -163,31 +165,27 @@ class RegistrationView(APIView):
             otp = random.randint(100000, 999999)  # 6 xonali OTP
             user.otp_code = str(otp)
             user.otp_created_at = timezone.now()
-            user.save()  # Foydalanuvchini (yangi yoki eski) OTP bilan saqlaymiz
 
-            # --- OTP Kodni Telegram Orqali Yuborish ---
-            otp = user.otp_code  # Saqlangan OTP kodni olamiz
-            user_telegram_id = user.telegram_id  # User obyektidan telegram_id ni olamiz
-            # Funksiyani chaqiramiz
-            message_sent = send_telegram_otp(user_telegram_id, otp)
+            if user_instance_was_found:  # Yoki user.pk is not None deb tekshirish mumkin
+                # Agar foydalanuvchi avvaldan mavjud bo'lsa (aktiv emas),
+                # kerakli maydonlarni yangilaymiz
+                fields_to_update = [
+                    'otp_code', 'otp_created_at', 'first_name', 'last_name',
+                    'username', 'telegram_id'
+                    # 'is_active' ni bu yerda o'zgartirmaymiz, u False bo'lib turishi kerak
+                ]
+                user.save(update_fields=fields_to_update)
+            else:
+                # Agar yangi foydalanuvchi bo'lsa, hamma maydonlarni saqlaymiz (INSERT)
+                user.save()
+
+            # Yangi chaqiruv (asinxron)
+            send_otp_telegram_task.delay(user.telegram_id, otp)
+            logger.info(f"Celery task to send OTP to {user.telegram_id} has been dispatched.")
             # ----------------------------------------
 
-            # --- Eski SMS yoki print qismini olib tashlaymiz ---
-            # sms_message = f"Sizning tasdiqlash kodingiz: {otp}"
-            # sms_sent = send_sms(phone_number, sms_message)
-            # print(f"--- OTP for {phone_number}: {otp} ---")
-            # --------------------------------------------------
-
-            if not message_sent:
-                # Agar xabar yuborishda muammo bo'lsa (masalan, user botni bloklagan)
-                # Hozircha faqat log yozamiz, lekin foydalanuvchiga boshqacha javob qaytarish mumkin
-                logger.warning(f"{user_telegram_id} ga OTP xabari yuborishda muammo bo'ldi.")
-                # Muhim: Xabar yuborilmasa ham, ro'yxatdan o'tish davom etaveradi.
-                # Foydalanuvchi keyinroq qayta urinib ko'rishi mumkin.
-
             return Response(
-                # Javob xabarini o'zgartiramiz
-                {"message": f"Tasdiqlash kodi Telegram orqali {user_telegram_id} ga yuborildi."},
+                {"message": f"Tasdiqlash kodi {phone_number} raqamiga Telegram orqali yuborildi."},
                 status=status.HTTP_200_OK
             )
         # Agar serializer validatsiyadan o'tmasa

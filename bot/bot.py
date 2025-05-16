@@ -3,6 +3,7 @@ import logging
 import os
 import sys  # <-- sys import qilindi
 import django  # <-- django import qilindi
+from .utils.db_utils import init_db
 
 print(f"DEBUG: Running script from: {__file__}")
 
@@ -36,19 +37,21 @@ from telegram import Update  # <-- Update telegram'dan import qilinadi
 # Loyihamizning modullaridan import qilamiz
 from .config import (
     BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
-    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES,
+    ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES, CHOOSING_PHONE_METHOD,
+    WAITING_MANUAL_PHONE,
 )
 from .handlers.common import cancel
 from .handlers.start_auth import (
     start, set_language_callback, start_registration_callback,
-    contact_handler, otp_handler
+    contact_handler, otp_handler, choose_phone_method_share_callback, choose_phone_method_manual_callback,
+    manual_phone_handler
 )
 from .handlers.order import handle_delivery_type_selection, handle_branch_selection, handle_location, \
     handle_payment_selection, handle_notes, skip_notes_callback
 from .handlers.main_menu import main_menu_dispatch
 from .handlers.callbacks import (
     category_selected_callback, product_selected_callback,
-     back_button_callback,
+    back_button_callback,
     start_checkout_callback, cart_quantity_change_callback, cart_item_delete_callback,
     cart_info_noop_callback, cart_refresh_callback, order_detail_callback, history_page_callback,
     cancel_order_callback, back_to_history_callback, branch_location_callback, product_detail_qty_change_callback,
@@ -65,6 +68,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     """Botni ishga tushuradi va handlerlarni qo'shadi."""
     # Persistence
+    init_db()
     persistence = PicklePersistence(filepath="bot_storage.pickle")  # Asl fayl nomi
 
     application = (
@@ -113,7 +117,15 @@ def main() -> None:
                 # per_message=False BU YERDAN OLINDI!
                 CallbackQueryHandler(start_registration_callback, pattern='^start_registration$')
             ],
+            CHOOSING_PHONE_METHOD: [
+                CallbackQueryHandler(choose_phone_method_share_callback, pattern='^reg_share_contact$'),
+                CallbackQueryHandler(choose_phone_method_manual_callback, pattern='^reg_enter_phone$'),
+                CallbackQueryHandler(cancel, pattern='^cancel_registration$')  # Registratsiyani bekor qilish
+            ],
             WAITING_PHONE: [MessageHandler(filters.CONTACT & ~filters.COMMAND, contact_handler)],
+            WAITING_MANUAL_PHONE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, manual_phone_handler)
+            ],
             WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d{4,6}$'), otp_handler)],
             MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_dispatch),
                         CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$')
