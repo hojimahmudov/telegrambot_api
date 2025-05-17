@@ -8,27 +8,13 @@ logger = logging.getLogger(__name__)
 
 
 def get_user_lang(context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Til kodini oladi: avval user_data dan, keyin DB dan, topilmasa 'uz'."""
-    # user_id ni olishga harakat qilamiz
-    user_id = None
-    if context.effective_user:  # Bu har doim Update ichida bo'ladi
-        user_id = context.effective_user.id
-    elif context.user_data and '_effective_user_id' in context.user_data:  # Ba'zi eski holatlar uchun
-        user_id = context.user_data['_effective_user_id']
-
-    # 1. Avval user_data (joriy sessiya) dan qidiramiz
+    """Foydalanuvchi kontekstidagi 'language_code' ni oladi, topilmasa 'uz' qaytaradi."""
     lang_code = context.user_data.get('language_code')
-    if lang_code:
+    if lang_code in ['uz', 'ru']:  # Faqat ruxsat etilgan tillarni qaytaramiz
         return lang_code
-
-    # 2. Agar user_data da bo'lmasa va user_id mavjud bo'lsa, DB dan qidiramiz
-    if user_id:
-        session = get_user_session_data(user_id)  # Bu db_utils dan keladi
-        if session and session.get('lang'):
-            context.user_data['language_code'] = session['lang']  # user_data ga keshlash
-            return session['lang']
-
-    return 'uz'  # Standart til
+    # Agar user_data da til bo'lmasa yoki noto'g'ri bo'lsa, standart 'uz'
+    # Bu funksiya endi user_id yoki DB bilan ishlamaydi, faqat context.user_data bilan
+    return 'uz'
 
 
 # --- Token Saqlash (Placeholder - XAVFSIZ EMAS!) ---

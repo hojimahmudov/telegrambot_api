@@ -7,9 +7,10 @@ from telegram.ext import ContextTypes, ConversationHandler
 from telegram.constants import ParseMode
 
 # Loyihadagi boshqa modullardan importlar
-from ..config import SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU, ASKING_DELIVERY_TYPE, \
+from ..config import SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, MAIN_MENU, ASKING_DELIVERY_TYPE, \
     CHOOSING_PHONE_METHOD, WAITING_MANUAL_PHONE
 from ..keyboards import get_language_keyboard, get_registration_keyboard, get_phone_keyboard, get_main_menu_markup
+from ..utils.db_utils import get_user_session_data
 from ..utils.helpers import get_user_lang, get_user_token_data, store_user_token_data, clear_user_token_data, \
     save_user_language_preference
 from ..utils.api_client import make_api_request, update_language_in_db_api
@@ -19,35 +20,25 @@ logger = logging.getLogger(__name__)
 
 # /start buyrug'i
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Bot ishga tushganda yoki tilni o'zgartirish kerak bo'lganda birinchi ishlaydi."""
     user = update.effective_user
     user_id = user.id
     logger.info(f"User {user_id} ({user.first_name}) called /start.")
 
-    # 1. user_data dan tilni tekshiramiz
     lang_code = context.user_data.get('language_code')
 
     if not lang_code:
-        # 2. Agar user_data da yo'q bo'lsa, va foydalanuvchi tizimga kirgan bo'lsa, profildan olamiz
-        token_data = await get_user_token_data(context, user_id)
-        if token_data:
-            logger.info(f"User {user_id} has token, attempting to fetch profile for language.")
-            profile_data = await make_api_request(context, 'GET', 'users/profile/', user_id)
-            if profile_data and not profile_data.get('error'):
-                db_lang = profile_data.get('language_code')
-                if db_lang:
-                    logger.info(f"Found language '{db_lang}' in profile for user {user_id}.")
-                    context.user_data['language_code'] = db_lang
-                    lang_code = db_lang
+        logger.info(f"Language not in session for user {user_id}. Checking bot's DB.")
+        session_data_from_db = get_user_session_data(user_id)  # Bu sinxron SQLite chaqiruvi
+        if session_data_from_db and session_data_from_db.get('lang'):
+            lang_code = session_data_from_db['lang']
+            context.user_data['language_code'] = lang_code
+            logger.info(f"User {user_id} language '{lang_code}' loaded from bot's DB into session.")
 
     if lang_code:
-        # Agar til ma'lum bo'lsa, to'g'ridan-to'g'ri keyingi bosqichga o'tamiz
-        logger.info(f"User {user_id} already has language '{lang_code}'. Proceeding to auth check.")
-        # `update` callback_query emas, message bo'lishi mumkin. `check_auth_and_proceed` buni hisobga olishi kerak.
-        return await check_auth_and_proceed(update, context)  # update obyektini to'g'ri uzatamiz
+        logger.info(f"User {user_id} proceeding with language '{lang_code}'.")
+        return await check_auth_and_proceed(update, context)
     else:
-        # Agar til hali ham noma'lum bo'lsa, so'raymiz
-        logger.info(f"Language not set for user {user_id}. Asking for language selection.")
+        logger.info(f"Language still not set for user {user_id}. Asking for language selection.")
         reply_markup = get_language_keyboard()
         await update.message.reply_text(
             "Iltimos, muloqot tilini tanlang / Пожалуйста, выберите язык общения:",
@@ -99,52 +90,77 @@ async def set_language_callback(update: Update, context: ContextTypes.DEFAULT_TY
 
 # Autentifikatsiyani tekshirish va davom etish
 async def check_auth_and_proceed(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    user = update.effective_user
+    user = update.effective_user  # Endi bu yerda effective_user bor
     user_id = user.id
+    # get_user_lang endi faqat context.user_data dan oladi.
+    # Agar user_data.language_code bo'lmasa (masalan, /start dan keyin DB dan ham topilmasa), 'uz' bo'ladi.
     lang_code = get_user_lang(context)
-    token_data = await get_user_token_data(context, user_id)
+
+    token_data = await get_user_token_data(context, user_id)  # DB dan oladi
     is_authenticated = False
 
     if token_data:
-        logger.info(f"Checking token validity for user {user_id}")
-        profile_data = await make_api_request(context, 'GET', 'users/profile/', user_id)
+        logger.info(f"User {user_id} has token from bot's DB. Checking API profile with lang: {lang_code}")
+        profile_data = await make_api_request(context, 'GET', 'users/profile/',
+                                              user_id)  # make_api_request lang_code ni contextdan oladi
+
         if profile_data and not profile_data.get('error'):
             is_authenticated = True
-            logger.info(f"User {user_id} is authenticated.")
-            db_lang = profile_data.get('language_code')
-            if db_lang and db_lang != lang_code:
-                context.user_data['language_code'] = db_lang
-                logger.info(f"User {user_id} language updated from DB: {db_lang}")
-                lang_code = db_lang
-        elif profile_data and profile_data.get('status_code') in [401, 403]:
-            logger.info(f"Token invalid/expired for {user_id}, handled by make_api_request")
-        elif profile_data and profile_data.get('error'):
-            error_text = "Profilni tekshirishda xatolik." if lang_code == 'uz' else "Ошибка при проверке профиля."
-            # Bu yerda xabar yuborish o'rniga, balki state'ni AUTH_CHECK ga o'tkazish kerakdir?
-            # Hozircha xabar yuboramiz va suhbatni tugatamiz
-            chat_id_to_send = update.effective_chat.id
-            await context.bot.send_message(chat_id=chat_id_to_send, text=error_text)
-            return ConversationHandler.END
+            logger.info(f"User {user_id} is authenticated via API.")
+
+            backend_lang = profile_data.get('language_code')
+            # context.user_data['language_code'] endi /start da DB dan o'rnatilgan bo'lishi mumkin
+            session_lang = context.user_data.get('language_code')
+
+            if backend_lang:  # Agar backendda til bo'lsa
+                if backend_lang != session_lang:
+                    logger.info(
+                        f"User {user_id} session lang ('{session_lang}') differs from API lang ('{backend_lang}'). Updating session & bot's DB.")
+                    context.user_data['language_code'] = backend_lang
+                    await save_user_language_preference(user_id, backend_lang)  # Botning SQLite siga yozamiz
+                lang_code = backend_lang  # Har doim backenddagi tilni ustun ko'ramiz, agar mavjud bo'lsa
+            elif session_lang:  # Backendda yo'q, lekin sessiyada bor (masalan, yangi user til tanlagan)
+                logger.info(
+                    f"User {user_id} has session lang '{session_lang}', API has no lang. Attempting to update API & bot's DB.")
+                api_updated = await update_language_in_db_api(context, user_id, session_lang)
+                if api_updated:
+                    await save_user_language_preference(user_id, session_lang)  # Botning SQLite siga ham yozamiz
+                lang_code = session_lang
+            else:  # Hech qayerda til yo'q (bo'lmasligi kerak)
+                lang_code = 'uz'  # Fallback
+                context.user_data['language_code'] = lang_code
+                logger.warning(f"User {user_id} - No language found in session or API. Defaulting to '{lang_code}'.")
+        # Agar profile_data xatolik qaytarsa (masalan 401), make_api_request tokenni tozalaydi
+        # va is_authenticated False bo'lib qoladi.
+
+    # lang_code check_auth_and_proceed boshida context.user_data dan olinadi.
+    # get_user_lang uni qaytaradi. Agar u yerda bo'lmasa, 'uz' default.
+    # Yuqoridagi if blokida u API dan kelgan til bilan yangilanishi mumkin.
 
     if is_authenticated:
+        # ... (asosiy menyuni chiqarish, MAIN_MENU qaytarish) ...
         welcome_text = "Asosiy menyu." if lang_code == 'uz' else "Главное меню."
-        main_markup = get_main_menu_markup(context)
-        chat_id_to_send = update.effective_chat.id
-        await context.bot.send_message(chat_id=chat_id_to_send, text=welcome_text, reply_markup=main_markup)
+        main_markup = get_main_menu_markup(context)  # Bu ham lang_code ni contextdan oladi
+        await context.bot.send_message(chat_id=user_id, text=welcome_text, reply_markup=main_markup)
         return MAIN_MENU
     else:
+        # ... (ro'yxatdan o'tish tugmasini chiqarish, AUTH_CHECK qaytarish) ...
         reply_markup = get_registration_keyboard(lang_code)
         prompt_text = "Davom etish uchun tizimga kirishingiz yoki ro'yxatdan o'tishingiz kerak." if lang_code == 'uz' else "Для продолжения необходимо войти или зарегистрироваться."
-        # Til tanlash xabarini tahrirlash yoki yangi yuborish
-        if update.callback_query:
+        # ... (xabar yuborish logikasi) ...
+        if update.callback_query and update.callback_query.message:
             try:
                 await update.callback_query.edit_message_text(text=prompt_text, reply_markup=reply_markup)
-            except Exception as e:  # Agar tahrirlab bo'lmasa
-                logger.warning(f"Could not edit message for auth prompt: {e}")
-                await context.bot.send_message(chat_id=user_id, text=prompt_text, reply_markup=reply_markup)
-        else:  # Agar /start dan kelgan bo'lsa
+            except Exception as e:
+                logger.warning(f"Could not edit for reg prompt: {e}");
+                await context.bot.send_message(chat_id=user_id,
+                                               text=prompt_text,
+                                               reply_markup=reply_markup)
+        elif update.message:
             await update.message.reply_text(text=prompt_text, reply_markup=reply_markup)
-        return AUTH_CHECK  # Ro'yxatdan o'tish tugmasini kutish holati
+        else:
+            await context.bot.send_message(chat_id=user_id, text=prompt_text, reply_markup=reply_markup)
+        return AUTH_CHECK
 
 
 # "Ro'yxatdan o'tish" tugmasi callback'i
@@ -217,159 +233,90 @@ async def choose_phone_method_manual_callback(update: Update, context: ContextTy
     return WAITING_MANUAL_PHONE
 
 
-async def manual_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Foydalanuvchi qo'lda kiritgan telefon raqamini qabul qiladi."""
+async def process_phone_for_login(update: Update, context: ContextTypes.DEFAULT_TYPE, phone_number: str):
+    """Telefon raqamini qabul qilib, APIga yuboradi va tokenlarni oladi."""
     user = update.effective_user
-    phone_number_input = update.message.text
-    telegram_id = user.id
-    first_name = user.first_name
-    last_name = user.last_name
+    # --- USER_ID NI ANIQLAB OLAMIZ VA ISHLATAMIZ ---
+    current_user_id = user.id  # Foydalanish uchun alohida o'zgaruvchiga olamiz
+    # ---------------------------------------------
     lang_code = get_user_lang(context)
 
-    # Telefon raqami formatini tekshiramiz (masalan, +998 bilan boshlanishi va 13 ta belgi)
-    # Bu validatsiya backenddagiga o'xshash bo'lishi kerak
-    phone_regex = r'^\+998\d{9}$'
-    if not re.match(phone_regex, phone_number_input):
-        error_text = "Telefon raqami noto'g'ri formatda kiritildi. Iltimos, +998XXXXXXXXX formatida qayta kiriting yoki /cancel bosing." if lang_code == 'uz' else "Номер телефона введен в неверном формате. Пожалуйста, введите снова в формате +998XXXXXXXXX или нажмите /cancel."
-        await update.message.reply_text(error_text)
-        return WAITING_MANUAL_PHONE  # Shu holatda qolamiz
-
-    logger.info(f"Received manually entered phone from {telegram_id}: {phone_number_input}")
-    context.user_data['registration_phone_number'] = phone_number_input  # Saqlaymiz
-
-    registration_data = {
-        "telegram_id": telegram_id,
-        "phone_number": phone_number_input,
-        "first_name": first_name,
-        "last_name": last_name or "",
+    login_data = {
+        "telegram_id": current_user_id,  # user.id o'rniga
+        "phone_number": phone_number,
+        "first_name": user.first_name,
+        "last_name": user.last_name or "",
         "username": user.username
     }
-    api_response = await make_api_request(context, 'POST', 'auth/register/', telegram_id, data=registration_data)
 
-    if api_response and not api_response.get('error'):
-        message_text = "Rahmat! Tasdiqlash kodi Telegram orqali sizga yuborildi. Iltimos, kodni shu yerga kiriting:" if lang_code == 'uz' else "Спасибо! Код подтверждения отправлен вам в Telegram. Пожалуйста, введите код здесь:"
-        await update.message.reply_text(message_text, reply_markup=ReplyKeyboardRemove())
-        return WAITING_OTP
-    else:
-        # ... (contact_handler'dagi kabi xatolikni qayta ishlash) ...
-        error_detail = api_response.get('detail', 'Noma\'lum xatolik') if api_response else 'Server bilan xatolik'
-        logger.warning(f"Manual Phone Registration API error for {telegram_id}: {error_detail}")
-        error_text = f"Xatolik: {error_detail}. /start bosing." if lang_code == 'uz' else f"Ошибка: {error_detail}. Нажмите /start."
-        await update.message.reply_text(error_text, reply_markup=ReplyKeyboardRemove())
-        if 'registration_phone_number' in context.user_data: del context.user_data['registration_phone_number']
-        return ConversationHandler.END
+    # make_api_request user_id ni kutadi (bu telegram_id)
+    api_response = await make_api_request(context, 'POST', 'auth/register/', current_user_id, data=login_data)
 
-
-# Kontakt handler
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    contact = update.message.contact
-    user = update.effective_user
-    phone_number = contact.phone_number
-    telegram_id = user.id
-    first_name = user.first_name
-    last_name = user.last_name
-    telegram_username = user.username
-    lang_code = get_user_lang(context)
-    if not phone_number.startswith('+'): phone_number = '+' + phone_number
-    logger.info(f"Received contact from {telegram_id}: {phone_number}")
-    context.user_data['registration_phone_number'] = phone_number
-    registration_data = {
-        "telegram_id": telegram_id, "phone_number": phone_number,
-        "first_name": first_name, "last_name": last_name or "",
-        "username": telegram_username
-    }
-    api_response = await make_api_request(context, 'POST', 'auth/register/', telegram_id, data=registration_data)
-    if api_response and not api_response.get('error'):
-        message_text = "Rahmat! Tasdiqlash kodi Telegram orqali sizga yuborildi. Iltimos, kodni shu yerga kiriting:" if lang_code == 'uz' else "Спасибо! Код подтверждения отправлен вам в Telegram. Пожалуйста, введите код здесь:"
-        await update.message.reply_text(message_text, reply_markup=ReplyKeyboardRemove())
-        return WAITING_OTP
-    else:
-        error_detail = api_response.get('detail',
-                                        'Noma\'lum server xatoligi') if api_response else 'Server bilan bog\'lanish xatosi'
-        status_code = api_response.get('status_code', 500) if api_response else 500
-        logger.warning(f"Registration API error for {telegram_id}: Status {status_code} - {error_detail}")
-        if "allaqachon aktiv" in str(error_detail).lower():
-            error_text = "Bu raqam allaqachon ro'yxatdan o'tgan va aktiv." if lang_code == 'uz' else "Этот номер уже зарегистрирован и активен."
-        elif "boshqa foydalanuvchi" in str(error_detail).lower():
-            error_text = "Xatolik: Telegram ID yoki telefon raqami boshqa foydalanuvchiga tegishli." if lang_code == 'uz' else "Ошибка: Telegram ID или номер телефона принадлежат другому пользователю."
-        else:
-            error_text = f"Xatolik yuz berdi ({str(error_detail)[:50]}...). /start bosing." if lang_code == 'uz' else f"Произошла ошибка ({str(error_detail)[:50]}...). Нажмите /start."
-        await update.message.reply_text(error_text, reply_markup=ReplyKeyboardRemove())
-        if 'registration_phone_number' in context.user_data: del context.user_data['registration_phone_number']
-        return ConversationHandler.END
-
-
-# OTP handler
-async def otp_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    user = update.effective_user
-    user_id = user.id
-    otp_code = update.message.text
-    # Tilni joriy sessiyadagi user_data dan olamiz
-    lang_code = context.user_data.get('language_code', 'uz')
-
-    if not re.match(r'^\d{4,6}$', otp_code):
-        # ... (xato matni va WAITING_OTP qaytarish) ...
-        error_text = "Noto'g'ri formatdagi kod. Iltimos, 4-6 xonali raqam kiriting." if lang_code == 'uz' else "Неверный формат кода. Пожалуйста, введите 4-6 значный код."
-        await update.message.reply_text(error_text)
-        return WAITING_OTP
-
-    phone_number = context.user_data.get('registration_phone_number')
-    if not phone_number:
-        # ... (xato matni va ConversationHandler.END qaytarish) ...
-        logger.error(f"OTP: Phone number not found in user_data for user {user_id}.")
-        error_text = "Ichki xatolik (telefon raqam). /start." if lang_code == 'uz' else "Внутренняя ошибка (номер телефона). /start."
-        await update.message.reply_text(error_text)
-        return ConversationHandler.END
-
-    logger.info(f"OTP: Received OTP {otp_code} for phone {phone_number} from user {user_id}")
-
-    verification_data = {"phone_number": phone_number, "otp_code": otp_code}
-    api_response = await make_api_request(context, 'POST', 'auth/verify/', user_id, data=verification_data)
-
-    if api_response and not api_response.get('error'):
+    if api_response and not api_response.get('error') and api_response.get('status_code') in [200, 201]:
         access_token = api_response.get('access_token')
         refresh_token = api_response.get('refresh_token')
-        user_api_data = api_response.get('user')  # API dan kelgan user ma'lumotlari
+        user_api_data = api_response.get('user')
 
         if access_token and refresh_token and user_api_data:
-            # store_user_token_data endi DBga yozadi (joriy sessiyadagi til bilan birga)
-            await store_user_token_data(context, user_id, access_token, refresh_token)
+            # --- TO'G'RILANGAN QATOR ---
+            # Endi current_user_id ni ishlatamiz
+            await store_user_token_data(context, current_user_id, access_token, refresh_token)
+            # -------------------------
 
-            # Backenddagi profil tilini ham sessiyadagi tilga moslaymiz
-            # (agar register paytida backend default tilni o'rnatgan bo'lsa yoki user boshqa tilda kirsa)
+            # Tilni sinxronlash logikasi (avvalgidek)
             backend_lang = user_api_data.get('language_code')
-            if lang_code != backend_lang:  # Agar sessiyadagi til backendnikidan farq qilsa
-                logger.info(f"OTP: Syncing session language '{lang_code}' to backend profile for user {user_id}")
-                api_lang_updated = await update_language_in_db_api(context, user_id, lang_code)
-                if api_lang_updated:
-                    logger.info(
-                        f"OTP: Language '{lang_code}' synced to backend API profile for user {user_id} after login.")
-                else:
+            # lang_code bu joriy sessiyadagi tanlangan til
+            if lang_code != backend_lang and backend_lang is not None:
+                logger.info(f"Login: Syncing API lang '{backend_lang}' to bot's DB for user {current_user_id}.")
+                await save_user_language_preference(current_user_id, backend_lang)  # Botning SQLite siga
+                context.user_data['language_code'] = backend_lang  # Sessiyaga ham
+            elif lang_code and backend_lang is None:  # Agar backendda til yo'q bo'lsa, sessiyadagini yozamiz
+                logger.info(
+                    f"Login: Syncing session lang '{lang_code}' to API and bot's DB for user {current_user_id}.")
+                api_lang_updated = await update_language_in_db_api(context, current_user_id, lang_code)
+                # save_user_language_preference store_user_token_data ichida chaqiriladi
+                # (chunki store_user_token_data tilni ham saqlaydi)
+                # Shuning uchun bu yerda alohida save_user_language_preference shart emas,
+                # chunki store_user_token_data joriy lang_code ni olib DBga yozadi.
+                # Lekin API ga yozish kerak bo'lsa, update_language_in_db_api qoladi.
+                if not api_lang_updated:
                     logger.warning(
-                        f"OTP: Failed to sync language '{lang_code}' to backend API profile for user {user_id} after login.")
-            else:
-                logger.info(f"OTP: Language '{lang_code}' already matches backend profile for user {user_id}.")
+                        f"Login: Failed to sync language '{lang_code}' to backend API for user {current_user_id} after login.")
 
-            success_text = "Muvaffaqiyatli! Siz tizimga kirdingiz." if lang_code == 'uz' else "Успешно! Вы вошли в систему."
-            await update.message.reply_text(success_text, reply_markup=get_main_menu_markup(context))
-
-            if 'registration_phone_number' in context.user_data:
-                del context.user_data['registration_phone_number']
+            success_message = api_response.get("message", "Muvaffaqiyatli!")
+            await update.message.reply_text(success_message, reply_markup=get_main_menu_markup(context))
             return MAIN_MENU
         else:
-            # ... (API dan noto'g'ri javob) ...
-            logger.error(f"OTP: Invalid response structure from /auth/verify/ for user {user_id}: {api_response}")
-            error_text = "Tizimdan javob olishda xatolik." if lang_code == 'uz' else "Ошибка при получении ответа от системы."
-            await update.message.reply_text(error_text)
-            return WAITING_OTP
+            logger.error(
+                f"Login Error: Invalid token structure in API response for {current_user_id}. Resp: {api_response}")
+            error_text = "Tizimga kirishda xatolik (token tuzilishi)." if lang_code == 'uz' else "Ошибка входа в систему (структура токена)."
+            await update.message.reply_text(error_text, reply_markup=ReplyKeyboardRemove())
+            return ConversationHandler.END
     else:
-        # ... (API xatoligi: noto'g'ri kod va h.k.) ...
-        error_detail = api_response.get('detail',
-                                        'Noma\'lum xatolik') if api_response else 'Server bilan bog\'lanish xatosi'
-        logger.warning(f"OTP Verification API error for user {user_id}: {error_detail}")
-        if "Noto'g'ri yoki muddati o'tgan" in str(error_detail):
-            error_text = "Kiritilgan kod noto'g'ri yoki muddati o'tgan. Qaytadan kiriting yoki /cancel." if lang_code == 'uz' else "Введенный код неверный или истек. Введите снова или /cancel."
-        else:
-            error_text = f"Xatolik: {str(error_detail)[:100]}" if lang_code == 'uz' else f"Ошибка: {str(error_detail)[:100]}"
+        # ... (API xatoligini qayta ishlash - avvalgidek) ...
+        error_detail = api_response.get('detail', api_response.get('error',
+                                                                   'Noma\'lum xatolik')) if api_response else 'Server bilan bog\'lanish xatosi'
+        await update.message.reply_text(f"Xatolik: {error_detail}.", reply_markup=ReplyKeyboardRemove())
+        return ConversationHandler.END
+
+
+async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    contact = update.message.contact
+    phone_number = contact.phone_number
+    if not phone_number.startswith('+'): phone_number = '+' + phone_number
+    logger.info(f"Received contact from {update.effective_user.id}: {phone_number}")
+    # context.user_data['registration_phone_number'] endi kerak emas
+    return await process_phone_for_login(update, context, phone_number)
+
+
+async def manual_phone_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    phone_number_input = update.message.text
+    lang_code = get_user_lang(context)
+    phone_regex = r'^\+998\d{9}$'
+    if not re.match(phone_regex, phone_number_input):
+        error_text = "Telefon raqami noto'g'ri formatda..."  # ...
         await update.message.reply_text(error_text)
-        return WAITING_OTP
+        return WAITING_MANUAL_PHONE
+    logger.info(f"Received manual phone from {update.effective_user.id}: {phone_number_input}")
+    # context.user_data['registration_phone_number'] endi kerak emas
+    return await process_phone_for_login(update, context, phone_number_input)

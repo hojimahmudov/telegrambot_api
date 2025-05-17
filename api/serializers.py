@@ -7,7 +7,7 @@ from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
 from .models import (
     User, Category, Product, Cart, CartItem, Order, OrderItem,
-    Branch, WorkingHours
+    Branch, WorkingHours, UserAddress
 )
 
 
@@ -322,4 +322,17 @@ class CheckoutSerializer(serializers.Serializer):
                     {"pickup_branch_id": _("Tanlangan filial hozirda yopiq.")}
                 )
 
+        return data
+
+
+class UserAddressSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = UserAddress
+        fields = ['id', 'user', 'name', 'address_text', 'latitude', 'longitude', 'created_at']
+        read_only_fields = ['user', 'created_at'] # User avtomatik o'rnatiladi
+
+    def validate(self, data):
+        # Foydalanuvchi o'zining manzillarini boshqarishi kerak
+        # Bu tekshiruv ViewSet da permission orqali qilinadi, bu yerda shart emas
+        # lekin qo'shimcha validatsiya qo'shish mumkin
         return data

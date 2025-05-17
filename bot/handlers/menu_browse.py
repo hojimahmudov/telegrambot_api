@@ -30,9 +30,19 @@ async def show_category_list(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if categories_response and not categories_response.get('error'):
         categories = categories_response.get('results', [])
         if categories:
-            keyboard = [[InlineKeyboardButton(c.get('name', 'N/A'), callback_data=f"cat_{c.get('id')}")] for c in
-                        categories]
-            final_markup = InlineKeyboardMarkup(keyboard)
+            keyboard_rows = []
+            row = []
+            for i, category in enumerate(categories):
+                button_text = category.get('name', 'N/A')
+                # Agar nom juda uzun bo'lsa qisqartirish mumkin
+                # if len(button_text) > 20: button_text = button_text[:18] + "..."
+                button = InlineKeyboardButton(button_text, callback_data=f"cat_{category.get('id')}")
+                row.append(button)
+                # Agar qatorda 2 ta tugma bo'lsa YOKI bu oxirgi element bo'lsa
+                if len(row) == 2 or (i + 1) == len(categories):
+                    keyboard_rows.append(row)
+                    row = []  # Keyingi qator uchun bo'shatamiz
+            final_markup = InlineKeyboardMarkup(keyboard_rows) if keyboard_rows else None
             final_text = "Kategoriyalardan birini tanlang:" if lang_code == 'uz' else "Выберите одну из категорий:"
         else:
             final_text = "Kategoriyalar topilmadi." if lang_code == 'uz' else "Категории не найдены."
@@ -78,19 +88,26 @@ async def show_product_list(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         category_info = products[0].get('category', {}) if products else {}
         category_name = category_info.get('name', 'Kategoriya')
         category_image_url = category_info.get('image_url')
-        keyboard = []
+        keyboard_list = []
         caption = f"<b>{category_name}</b>\n\nMahsulotni tanlang:" if lang_code == 'uz' else f"<b>{category_name}</b>\n\nВыберите продукт:"
 
         if products:
-            for product in products:
-                button = InlineKeyboardButton(product.get('name', 'Nomsiz'), callback_data=f"prod_{product.get('id')}")
-                keyboard.append([button])
+            product_buttons_row = []
+            for i, product in enumerate(products):
+                button_text = product.get('name', 'Nomsiz')
+                if len(button_text) > 25: button_text = button_text[:22] + "..."  # Uzun nomlarni qisqartirish
+                button = InlineKeyboardButton(button_text, callback_data=f"prod_{product.get('id')}")
+                product_buttons_row.append(button)
+                if len(product_buttons_row) == 2 or (i + 1) == len(products):
+                    keyboard_list.append(product_buttons_row)
+                    product_buttons_row = []
         else:
             caption = "Bu kategoriyada mahsulotlar topilmadi." if lang_code == 'uz' else "В этой категории товары не найдены."
 
         back_button_text = "< Ortga" if lang_code == 'uz' else "< Назад"
-        keyboard.append([InlineKeyboardButton(back_button_text, callback_data="back_to_categories")])
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        keyboard_list.append([InlineKeyboardButton(back_button_text, callback_data="back_to_categories")])
+
+        reply_markup = InlineKeyboardMarkup(keyboard_list) if keyboard_list else None
         photo_url = category_image_url
 
         if photo_url:

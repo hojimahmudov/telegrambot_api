@@ -198,12 +198,3 @@ TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 INTERNAL_IPS = [
     "127.0.0.1",
 ]
-
-CELERY_BROKER_URL = 'redis://localhost:6379/0'  # Redis manzili (standart)
-CELERY_RESULT_BACKEND = 'redis://localhost:6379/0' # Natijalarni saqlash uchun (ixtiyoriy, lekin yaxshi)
-CELERY_ACCEPT_CONTENT = ['json']
-CELERY_TASK_SERIALIZER = 'json'
-CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = TIME_ZONE # Django'ning TIME_ZONE'ini ishlatadi (Asia/Tashkent)
-CELERY_TASK_TRACK_STARTED = True # Vazifa boshlanganini logga yozish uchun
-CELERY_TASK_TIME_LIMIT = 30 * 60 # Vazifa maksimal bajarilish vaqti (sekundda)

@@ -9,6 +9,8 @@ from django.utils.translation import gettext_lazy as _
 from parler.models import TranslatableModel, TranslatedFields
 from django.utils import timezone
 
+from api.utils import send_direct_telegram_notification, logger
+
 
 # --- Foydalanuvchi Modeli ---
 class User(AbstractUser):
@@ -33,17 +35,6 @@ class User(AbstractUser):
     # Email maydonini majburiy bo'lmagan holga keltiramiz
     email = models.EmailField(_('email address'), blank=True, null=True)
 
-    otp_code = models.CharField(
-        _("OTP Kodu"),
-        max_length=6,
-        null=True,
-        blank=True  # Kod tasdiqlangandan keyin bo'shatilishi mumkin
-    )
-    otp_created_at = models.DateTimeField(
-        _("OTP Yaratilgan Vaqti"),
-        null=True,
-        blank=True
-    )
     language_code = models.CharField(
         _("Til kodi"),
         max_length=2,
@@ -71,21 +62,6 @@ class User(AbstractUser):
 
     def __str__(self):
         return self.username or self.phone_number or f"User {self.pk}"
-
-    def is_otp_valid(self, code):
-        """OTP kod to'g'riligini va muddati o'tmaganligini tekshiradi."""
-        if not self.otp_code or not self.otp_created_at:
-            return False
-        # Masalan, OTP 5 daqiqa amal qilsin
-        if self.otp_created_at < timezone.now() - timezone.timedelta(minutes=5):
-            return False
-        return self.otp_code == code
-
-    def clear_otp(self):
-        """OTP kodni tozalaydi."""
-        self.otp_code = None
-        self.otp_created_at = None
-        self.save(update_fields=['otp_code', 'otp_created_at'])
 
 
 # --- Kategoriya Modeli ---
@@ -391,6 +367,62 @@ class Order(models.Model):
     created_at = models.DateTimeField(_("Yaratilgan vaqti"), auto_now_add=True)
     updated_at = models.DateTimeField(_("Yangilangan vaqti"), auto_now=True)
 
+    def save(self, *args, **kwargs):
+        is_new_creation = self._state.adding  # Obyekt yangi yaratilyaptimi?
+        old_status = None
+
+        if not is_new_creation and self.pk:  # Agar bu mavjud obyektni yangilash bo'lsa
+            try:
+                # Bazadan obyektning joriy (saqlashdan oldingi) holatini o'qiymiz
+                old_order_instance = Order.objects.get(pk=self.pk)
+                old_status = old_order_instance.status
+            except Order.DoesNotExist:
+                # Bu holat self.pk mavjud bo'lganda bo'lmasligi kerak, lekin ehtiyot shart
+                logger.warning(f"Order with pk {self.pk} not found in DB during save for status check.")
+                pass  # old_status None bo'lib qoladi
+
+        # Asosiy saqlash amalini bajaramiz
+        super().save(*args, **kwargs)
+
+        # Saqlashdan keyin, self.status yangi (yoki o'zgarmagan) statusni o'z ichiga oladi
+        new_status_after_save = self.status
+
+        # Agar bu mavjud buyurtma bo'lsa va status haqiqatan ham o'zgargan bo'lsa, xabar yuboramiz
+        if not is_new_creation and old_status is not None and old_status != new_status_after_save:
+            if self.user and self.user.telegram_id and self.user.language_code:
+                logger.info(
+                    f"Order {self.pk} status changed from '{old_status}' to '{new_status_after_save}'. "
+                    f"Attempting to send notification to user {self.user.telegram_id}."
+                )
+                # Statusning foydalanuvchiga ko'rinadigan nomini olamiz
+                # get_status_display() metodi choices'dagi ikkinchi qiymatni qaytaradi
+                status_display_name = self.get_status_display()
+
+                message_text = ""
+                if self.user.language_code == 'uz':
+                    message_text = f"🔔 Sizning #{self.pk} raqamli buyurtmangizning holati \"<b>{status_display_name}</b>\" ga o'zgardi."
+                else:  # Standart til ruscha yoki boshqa tillarni ham qo'shish mumkin
+                    message_text = f"🔔 Статус вашего заказа #{self.pk} изменен на \"<b>{status_display_name}</b>\"."
+
+                try:
+                    # Sinxron xabar yuborish funksiyasini chaqiramiz
+                    send_direct_telegram_notification(  # Bu funksiya utils.py da bo'lishi kerak
+                        telegram_id=self.user.telegram_id,
+                        message_text=message_text
+                    )
+                except Exception as e:
+                    # Xabar yuborishdagi xatolik saqlash jarayonini to'xtatmasligi kerak
+                    logger.error(f"Failed to send order status notification for order {self.pk} (sync): {e}",
+                                 exc_info=True)
+            else:
+                logger.warning(
+                    f"Order {self.pk} status changed, but user telegram_id or language_code is missing. Cannot send notification.")
+        elif is_new_creation:
+            # Yangi buyurtma yaratilganda (checkout orqali), xabar yuborish checkout logikasi tomonidan amalga oshiriladi.
+            # Bu yerda qo'shimcha xabar yuborish shart emas, faqat log yozamiz.
+            logger.info(
+                f"New order {self.pk} created with status '{new_status_after_save}'. Notification (if any) handled by checkout process.")
+
     class Meta:
         verbose_name = _("Buyurtma")
         verbose_name_plural = _("Buyurtmalar")
@@ -400,6 +432,43 @@ class Order(models.Model):
         # Foydalanuvchi None bo'lishi mumkinligini hisobga olamiz (SET_NULL tufayli)
         user_display = self.user.username if self.user else (self.user.phone_number if self.user else _('Noma\'lum'))
         return f"Buyurtma #{self.pk} ({user_display}) - {self.get_status_display()}"
+
+
+class UserAddress(models.Model):
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name='addresses',
+        verbose_name=_("Foydalanuvchi")
+    )
+    name = models.CharField(
+        _("Manzil nomi"),
+        max_length=100,
+        blank=True,
+        null=True,
+        help_text=_("Masalan, 'Uy', 'Ish', 'Do'stimniki'")
+    )
+    address_text = models.TextField(
+        _("Matnli manzil"),
+        blank=True,
+        null=True,
+        help_text=_("Reverse geocodingdan olingan yoki foydalanuvchi kiritgan to'liq manzil")
+    )
+    latitude = models.FloatField(_("Kenglik"))
+    longitude = models.FloatField(_("Uzunlik"))
+    # is_default = models.BooleanField(_("Asosiy manzil"), default=False) # Keyinchalik qo'shish mumkin
+    created_at = models.DateTimeField(("Qo'shilgan vaqti"), auto_now_add=True)
+    updated_at = models.DateTimeField(("Yangilangan vaqti"), auto_now=True)
+
+    class Meta:
+        verbose_name = _("Foydalanuvchi manzili")
+        verbose_name_plural = _("Foydalanuvchi manzillari")
+        ordering = ['-created_at']
+        # Bitta foydalanuvchi uchun bir xil koordinatalar qayta kiritilmasligi uchun
+        # unique_together = [['user', 'latitude', 'longitude']] # Agar kerak bo'lsa
+
+    def __str__(self):
+        return f"{self.name or self.address_text or 'Manzil'} ({self.user.username})"
 
 
 class OrderItem(models.Model):

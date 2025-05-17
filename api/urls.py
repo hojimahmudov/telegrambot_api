@@ -3,9 +3,8 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 # View'larni import qilamiz
 from .views import (
-    CategoryViewSet, ProductViewSet, UserProfileView,
-    RegistrationView, OTPVerificationView, CartView, CheckoutView,
-    BranchViewSet, OrderHistoryView, OrderDetailView, OrderCancelView
+    CategoryViewSet, ProductViewSet, UserProfileView, CartView, CheckoutView,
+    BranchViewSet, OrderHistoryView, OrderDetailView, OrderCancelView, PhoneLoginOrRegisterView, UserAddressViewSet
 )
 # simplejwt view'larini import qilamiz (token refresh uchun)
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -18,6 +17,7 @@ router = DefaultRouter()
 router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'products', ProductViewSet, basename='product')
 router.register(r'branches', BranchViewSet, basename='branch')
+router.register(r'users/addresses', UserAddressViewSet, basename='useraddress')
 
 # URL pattern'lari ro'yxati
 urlpatterns = [
@@ -28,9 +28,7 @@ urlpatterns = [
     # Alohida View uchun URL manzil
     path('users/profile/', UserProfileView.as_view(), name='user-profile'),
 
-    # --- Autentifikatsiya Endpoint'lari ---
-    path('auth/register/', RegistrationView.as_view(), name='auth-register'),
-    path('auth/verify/', OTPVerificationView.as_view(), name='auth-verify'),
+    path('auth/register/', PhoneLoginOrRegisterView.as_view(), name='auth-register-login'),
 
     # --- JWT Token Endpoint'lari ---
     # Agar username/password login kerak bo'lsa (hozir bizda OTP orqali)

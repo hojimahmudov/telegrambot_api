@@ -152,3 +152,63 @@ async def update_language_in_db_api(context: ContextTypes.DEFAULT_TYPE, user_id:
 async def close_api_client():
     """HTTPX klientni yopadi."""
     await api_client.aclose()
+
+
+async def reverse_geocode(latitude: float, longitude: float) -> str | None:
+    """Berilgan koordinatalar uchun Nominatim orqali manzilni olishga harakat qiladi."""
+    # Nominatim API endpoint
+    nominatim_url = "https://nominatim.openstreetmap.org/reverse"
+    params = {
+        'format': 'json',
+        'lat': str(latitude),
+        'lon': str(longitude),
+        'accept-language': 'uz,ru',  # Qaysi tillarda natija kerakligi
+        'addressdetails': '1'  # Batafsilroq ma'lumot olish uchun
+    }
+    headers = {
+        'User-Agent': 'TelegramFoodOrderBot/1.0 (dev)'  # Nominatim siyosati uchun
+    }
+    try:
+        # httpx.AsyncClient() ni har safar yaratmasdan, global api_client'ni ishlatamiz
+        # Lekin Nominatim uchun alohida klient yoki oddiy requests ham ishlatish mumkin.
+        # Hozircha yangi vaqtinchalik klient yaratamiz, chunki base_url boshqacha.
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            response = await client.get(nominatim_url, params=params, headers=headers)
+        response.raise_for_status()  # HTTP xatolik bo'lsa
+        data = response.json()
+
+        # display_name odatda to'liq manzilni beradi
+        address_text = data.get('display_name')
+        if address_text:
+            logger.info(f"Reverse geocoded for ({latitude},{longitude}): {address_text}")
+            return address_text
+        else:
+            # Agar display_name bo'lmasa, address obyektidan yig'ishga harakat qilamiz
+            # Bu qism Nominatim javobiga qarab moslashtirilishi kerak
+            addr_parts = data.get('address', {})
+            road = addr_parts.get('road', '')
+            house_number = addr_parts.get('house_number', '')
+            suburb = addr_parts.get('suburb', addr_parts.get('borough', addr_parts.get('neighbourhood', '')))
+            city_district = addr_parts.get('city_district', '')
+            city = addr_parts.get('city', addr_parts.get('town', addr_parts.get('village', '')))
+
+            parts_list = [p for p in [house_number, road, suburb, city_district, city] if p]
+            if parts_list:
+                address_text = ", ".join(parts_list)
+                logger.info(f"Reverse geocoded (parts) for ({latitude},{longitude}): {address_text}")
+                return address_text
+            else:
+                logger.warning(
+                    f"Could not extract meaningful address from Nominatim for ({latitude},{longitude}). Response: {data}")
+                return None
+
+    except httpx.HTTPStatusError as e:
+        logger.error(
+            f"Nominatim API HTTP error for ({latitude},{longitude}): {e.response.status_code} - {e.response.text}")
+        return None
+    except httpx.RequestError as e:
+        logger.error(f"Nominatim API Request error for ({latitude},{longitude}): {e}")
+        return None
+    except Exception as e:
+        logger.error(f"Unexpected error during reverse_geocode for ({latitude},{longitude}): {e}", exc_info=True)
+        return None

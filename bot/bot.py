@@ -36,18 +36,20 @@ from telegram.ext import (
 from telegram import Update  # <-- Update telegram'dan import qilinadi
 # Loyihamizning modullaridan import qilamiz
 from .config import (
-    BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, WAITING_OTP, MAIN_MENU,
+    BOT_TOKEN, SELECTING_LANG, AUTH_CHECK, WAITING_PHONE, MAIN_MENU,
     ASKING_DELIVERY_TYPE, ASKING_BRANCH, ASKING_LOCATION, ASKING_PAYMENT, ASKING_NOTES, CHOOSING_PHONE_METHOD,
-    WAITING_MANUAL_PHONE,
+    WAITING_MANUAL_PHONE, CONFIRMING_LOCATION, SELECTING_ADDRESS_OR_NEW, ASKING_SAVE_NEW_ADDRESS, ENTERING_ADDRESS_NAME,
 )
 from .handlers.common import cancel
 from .handlers.start_auth import (
     start, set_language_callback, start_registration_callback,
-    contact_handler, otp_handler, choose_phone_method_share_callback, choose_phone_method_manual_callback,
+    contact_handler, choose_phone_method_share_callback, choose_phone_method_manual_callback,
     manual_phone_handler
 )
 from .handlers.order import handle_delivery_type_selection, handle_branch_selection, handle_location, \
-    handle_payment_selection, handle_notes, skip_notes_callback
+    handle_payment_selection, handle_notes, skip_notes_callback, confirm_location_callback, \
+    handle_saved_address_selection, handle_send_new_location_callback, handle_save_new_address_decision_callback, \
+    handle_address_name_input, skip_address_name_callback
 from .handlers.main_menu import main_menu_dispatch
 from .handlers.callbacks import (
     category_selected_callback, product_selected_callback,
@@ -126,7 +128,7 @@ def main() -> None:
             WAITING_MANUAL_PHONE: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, manual_phone_handler)
             ],
-            WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d{4,6}$'), otp_handler)],
+            # WAITING_OTP: [MessageHandler(filters.TEXT & ~filters.COMMAND & filters.Regex(r'^\d{4,6}$'), otp_handler)],
             MAIN_MENU: [MessageHandler(filters.TEXT & ~filters.COMMAND, main_menu_dispatch),
                         CallbackQueryHandler(start_checkout_callback, pattern='^start_checkout$')
                         ],
@@ -146,6 +148,25 @@ def main() -> None:
                 MessageHandler(filters.LOCATION & ~filters.COMMAND, handle_location),
                 MessageHandler(filters.ALL & ~filters.COMMAND, lambda u, c: u.message.reply_text("...")),
                 # per_message=False BU YERDAN OLINDI!
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            CONFIRMING_LOCATION: [
+                CallbackQueryHandler(confirm_location_callback, pattern='^loc_confirm_'),
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')  # Bu yerda ham cancel
+            ],
+            SELECTING_ADDRESS_OR_NEW: [
+                CallbackQueryHandler(handle_saved_address_selection, pattern='^use_saved_addr_'),
+                CallbackQueryHandler(handle_send_new_location_callback, pattern='^send_new_location$'),
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ASKING_SAVE_NEW_ADDRESS: [
+                CallbackQueryHandler(handle_save_new_address_decision_callback, pattern='^save_new_addr_'),
+                CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
+            ],
+            ENTERING_ADDRESS_NAME: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_address_name_input),
+                CallbackQueryHandler(skip_address_name_callback, pattern='^save_addr_skip_name$'),
+                CommandHandler("skip_address_name", skip_address_name_callback),  # /skip_address_name buyrug'i uchun
                 CallbackQueryHandler(cancel, pattern='^checkout_cancel$')
             ],
             ASKING_PAYMENT: [

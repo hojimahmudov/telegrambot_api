@@ -2,12 +2,13 @@
 
 from rest_framework import viewsets, permissions, generics, status
 from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from django.shortcuts import get_object_or_404
 from django.db.models import Q
-from .tasks import send_otp_telegram_task
-from .utils import send_telegram_otp, logger
+from django.db import IntegrityError
+from .utils import logger
 from django.utils import timezone
 import random
 from rest_framework_simplejwt.tokens import RefreshToken
@@ -19,14 +20,14 @@ from decimal import Decimal  # <-- Narxlar bilan ishlash uchun
 # Modellarni import qilamiz
 from .models import (
     User, Category, Product, Cart, CartItem,
-    Order, OrderItem, Branch
+    Order, OrderItem, Branch, UserAddress
 )
 # Serializer'larni import qilamiz
 from .serializers import (
     UserSerializer, CategorySerializer, ProductSerializer,
     RegistrationSerializer, OTPVerificationSerializer,
     CartSerializer, CartItemSerializer,
-    OrderSerializer, OrderItemSerializer, CheckoutSerializer, BranchSerializer
+    OrderSerializer, OrderItemSerializer, CheckoutSerializer, BranchSerializer, UserAddressSerializer
 )
 
 
@@ -101,149 +102,94 @@ class UserProfileView(generics.RetrieveUpdateAPIView):
     # Faqat ruxsat etilgan maydonlar (serializerda ko'rsatilgan) yangilanadi
 
 
-class RegistrationView(APIView):
-    """
-    Yangi foydalanuvchini ro'yxatdan o'tkazish va OTP yuborish uchun endpoint.
-    Foydalanuvchi aktiv bo'lmagan holatda yaratiladi yoki yangilanadi.
-    """
-    permission_classes = [permissions.AllowAny]  # Hamma ro'yxatdan o'tishi mumkin
+class PhoneLoginOrRegisterView(APIView):  # Eski RegistrationView o'rniga
+    permission_classes = [AllowAny]
+
+    def _generate_unique_username(self, base_username: str, current_user_pk: int | None = None) -> str:
+        # Bu funksiya avvalgidek qoladi
+        username_to_try = base_username
+        counter = 1
+        while True:
+            qs = User.objects.filter(username=username_to_try)
+            if current_user_pk:
+                qs = qs.exclude(pk=current_user_pk)
+            if not qs.exists():
+                return username_to_try
+            username_to_try = f"{base_username}_{counter}"
+            counter += 1
 
     def post(self, request):
         serializer = RegistrationSerializer(data=request.data)
-        if serializer.is_valid():
-            validated_data = serializer.validated_data
-            phone_number = validated_data['phone_number']
-            telegram_id = validated_data['telegram_id']
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
-            existing_user_by_tg = User.objects.filter(telegram_id=telegram_id).first()
-            if existing_user_by_tg and existing_user_by_tg.phone_number != phone_number:
-                return Response(
-                    {"error": "Bu Telegram ID allaqachon boshqa raqam bilan ro'yxatdan o'tgan."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            user_instance_was_found = False
-            try:
-                # Telefon raqami bo'yicha foydalanuvchini qidiramiz
-                user = User.objects.get(phone_number=phone_number)
-                if user.is_active:
-                    # Agar foydalanuvchi aktiv bo'lsa, xatolik qaytaramiz
-                    return Response(
-                        {"error": "Bu telefon raqami bilan allaqachon aktiv foydalanuvchi mavjud."},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-                # Agar aktiv bo'lmasa (oldingi tugallanmagan ro'yxatdan o'tish),
-                # ma'lumotlarini yangilab, yangi OTP yuboramiz
-                user_instance_was_found = True
-                user.telegram_id = telegram_id
-                user.first_name = validated_data.get('first_name', user.first_name)
-                user.last_name = validated_data.get('last_name', user.last_name)
-                # Username'ni yangilash yoki generatsiya qilish
-                username = validated_data.get('username') or f"user_{telegram_id}"
-                if User.objects.filter(username=username).exclude(pk=user.pk).exists():
-                    username = f"{username}_{random.randint(100, 999)}"  # Agar band bo'lsa
-                user.username = username
-                user.set_unusable_password()  # Parolni o'rnatmaymiz, chunki OTP ishlatiladi
-                # user.save() # OTP o'rnatilgandan keyin saqlaymiz
+        validated_data = serializer.validated_data
+        phone_number = validated_data['phone_number']
+        telegram_id = validated_data['telegram_id']
+        first_name = validated_data.get('first_name')
+        last_name = validated_data.get('last_name')
+        username_from_bot = validated_data.get('username')
 
-            except User.DoesNotExist:
-                # Agar foydalanuvchi mavjud bo'lmasa, yangisini yaratamiz
-                username = validated_data.get('username') or f"user_{telegram_id}"
-                if User.objects.filter(username=username).exists():
-                    username = f"{username}_{random.randint(100, 999)}"
-
-                user = User(
-                    telegram_id=telegram_id,
-                    phone_number=phone_number,
-                    first_name=validated_data.get('first_name'),
-                    last_name=validated_data.get('last_name'),
-                    username=username,
-                    is_active=False  # Muhim: Aktiv emas!
-                )
-                user.set_unusable_password()  # Parol o'rnatilmaydi
-
-            # --- OTP Generatsiya va Saqlash ---
-            otp = random.randint(100000, 999999)  # 6 xonali OTP
-            user.otp_code = str(otp)
-            user.otp_created_at = timezone.now()
-
-            if user_instance_was_found:  # Yoki user.pk is not None deb tekshirish mumkin
-                # Agar foydalanuvchi avvaldan mavjud bo'lsa (aktiv emas),
-                # kerakli maydonlarni yangilaymiz
-                fields_to_update = [
-                    'otp_code', 'otp_created_at', 'first_name', 'last_name',
-                    'username', 'telegram_id'
-                    # 'is_active' ni bu yerda o'zgartirmaymiz, u False bo'lib turishi kerak
-                ]
-                user.save(update_fields=fields_to_update)
-            else:
-                # Agar yangi foydalanuvchi bo'lsa, hamma maydonlarni saqlaymiz (INSERT)
-                user.save()
-
-            # Yangi chaqiruv (asinxron)
-            send_otp_telegram_task.delay(user.telegram_id, otp)
-            logger.info(f"Celery task to send OTP to {user.telegram_id} has been dispatched.")
-            # ----------------------------------------
-
+        # Telegram ID unikalligini tekshirish (avvalgidek)
+        conflicting_user_by_tg_id = User.objects.filter(telegram_id=telegram_id).exclude(
+            phone_number=phone_number).first()
+        if conflicting_user_by_tg_id:
             return Response(
-                {"message": f"Tasdiqlash kodi {phone_number} raqamiga Telegram orqali yuborildi."},
-                status=status.HTTP_200_OK
+                {"error": "Bu Telegram ID allaqachon boshqa telefon raqamiga bog'langan."},
+                status=status.HTTP_400_BAD_REQUEST
             )
-        # Agar serializer validatsiyadan o'tmasa
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
+        user = None
+        created = False
+        try:
+            user = User.objects.get(phone_number=phone_number)
+            # Foydalanuvchi mavjud. Ma'lumotlarini yangilaymiz (agar kerak bo'lsa).
+            user.telegram_id = telegram_id  # Agar o'zgargan bo'lsa
+            user.first_name = first_name if first_name else user.first_name
+            user.last_name = last_name if last_name is not None else user.last_name
 
-class OTPVerificationView(APIView):
-    """
-    Telefon raqami va OTP kod yordamida foydalanuvchini tasdiqlash
-    va JWT tokenlarini qaytarish uchun endpoint.
-    """
-    permission_classes = [permissions.AllowAny]  # Hamma OTP ni tasdiqlashi mumkin
+            base_username_for_update = username_from_bot if username_from_bot else user.username
+            if not base_username_for_update:
+                base_username_for_update = f"user_{telegram_id}"
+            user.username = self._generate_unique_username(base_username_for_update, user.pk)
+            user.is_active = True  # DARHOL AKTIV QILAMIZ
 
-    def post(self, request):
-        serializer = OTPVerificationSerializer(data=request.data)
-        if serializer.is_valid():
-            phone_number = serializer.validated_data['phone_number']
-            otp_code = serializer.validated_data['otp_code']
+        except User.DoesNotExist:
+            # Yangi foydalanuvchi
+            base_username_for_new = username_from_bot if username_from_bot else f"user_{telegram_id}"
+            final_username = self._generate_unique_username(base_username_for_new)
 
-            try:
-                # Aktiv bo'lmagan foydalanuvchini telefon raqami bo'yicha topamiz
-                user = User.objects.get(phone_number=phone_number, is_active=False)
-            except User.DoesNotExist:
-                return Response(
-                    {"error": "Bunday raqamli aktiv bo'lmagan foydalanuvchi topilmadi."},
-                    status=status.HTTP_404_NOT_FOUND  # 404 Not Found ishlatgan ma'qulroq
-                )
+            user = User(
+                telegram_id=telegram_id,
+                phone_number=phone_number,
+                first_name=first_name,
+                last_name=last_name,
+                username=final_username,
+                is_active=True  # DARHOL AKTIV QILAMIZ
+            )
+            user.set_unusable_password()
+            created = True
 
-            # Model ichidagi metod orqali OTP ni tekshiramiz (muddati ham tekshiriladi)
-            if user.is_otp_valid(otp_code):
-                # Foydalanuvchini aktiv qilamiz
-                user.is_active = True
-                user.save(update_fields=['is_active'])
-                # OTP kodni tozalaymiz
-                user.clear_otp()
+        try:
+            user.save()  # To'liq saqlaymiz
+        except IntegrityError as e:
+            logger.error(f"IntegrityError on saving user {getattr(user, 'username', 'N/A')}: {e}", exc_info=True)
+            # ... (avvalgi IntegrityError ni qayta ishlash logikasi) ...
+            return Response({"error": "Foydalanuvchini saqlashda DB xatoligi."}, status=status.HTTP_400_BAD_REQUEST)
 
-                # --- JWT Tokenlarini Generatsiya Qilish ---
-                refresh = RefreshToken.for_user(user)
-                access_token = str(refresh.access_token)
-                # --------------------------------------
+        logger.info(
+            f"User {user.username} (TGID: {user.telegram_id}) {'created and' if created else 'found and'} activated.")
 
-                # Foydalanuvchi ma'lumotlarini javob uchun tayyorlaymiz
-                user_serializer = UserSerializer(user)
+        # --- ENDI TOKENLARNI GENERATSIYA QILIB QAYTARAMIZ ---
+        refresh = RefreshToken.for_user(user)
+        user_serializer = UserSerializer(user)  # Foydalanuvchi ma'lumotlari uchun
 
-                return Response({
-                    'message': "Foydalanuvchi muvaffaqiyatli tasdiqlandi!",
-                    'access_token': access_token,
-                    'refresh_token': str(refresh),
-                    'user': user_serializer.data
-                }, status=status.HTTP_200_OK)
-            else:
-                # Agar OTP noto'g'ri yoki muddati o'tgan bo'lsa
-                return Response(
-                    {"error": "Noto'g'ri yoki muddati o'tgan OTP kod."},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-        # Agar serializer validatsiyadan o'tmasa
-        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+        return Response({
+            'message': "Muvaffaqiyatli tizimga kirdingiz!" if not created else "Muvaffaqiyatli ro'yxatdan o'tdingiz!",
+            'access_token': str(refresh.access_token),
+            'refresh_token': str(refresh),
+            'user': user_serializer.data
+        }, status=status.HTTP_200_OK if not created else status.HTTP_201_CREATED)
 
 
 class CartView(APIView):
@@ -475,29 +421,66 @@ class CheckoutView(APIView):
 
         # --- Taxminiy vaqtni hisoblaymiz va saqlaymiz ---
         relevant_branch = None
-        if delivery_type == 'pickup':
+        if delivery_type == 'pickup' and pickup_branch:  # pickup_branch bu Branch obyekt
             relevant_branch = pickup_branch
-        # TODO: Agar delivery bo'lsa, qaysi filialdan yetkazilishini aniqlash logikasi kerak
-        # Hozircha faqat pickup uchun hisoblaymiz yoki standart filial belgilash mumkin
-        # Masalan, ID si 1 bo'lgan filialni standart deb olaylik (agar pickup_branch bo'lmasa)
-        # elif Branch.objects.filter(is_active=True).exists():
-        #      relevant_branch = Branch.objects.filter(is_active=True).first()
+        elif delivery_type == 'delivery':
+            logger.info(f"Delivery order {order.id}. Finding a relevant branch for time estimation.")
+            # Avval aktiv filiallarni olamiz. Ish vaqtlarini ham oldindan olamiz, chunki is_open_now() ularni ishlatadi.
+            active_branches = Branch.objects.filter(is_active=True).prefetch_related('working_hours')
+
+            # --- OCHIQ FILIALNI TOPISH LOGIKASI ---
+            found_open_branch = False
+            for branch_candidate in active_branches:
+                if branch_candidate.is_open_now():  # Model metodini chaqiramiz
+                    relevant_branch = branch_candidate
+                    logger.info(
+                        f"Delivery order {order.id} assigned to OPEN branch {relevant_branch.name} (ID: {relevant_branch.id}) for time estimation.")
+                    found_open_branch = True
+                    break  # Ochiq filial topildi, qidirishni to'xtatamiz
+
+            if not found_open_branch and active_branches.exists():
+                # Agar ochiq filial topilmasa, lekin aktiv filiallar bo'lsa, birinchisini olamiz
+                relevant_branch = active_branches.first()
+                logger.warning(
+                    f"No OPEN branches found for delivery order {order.id}. "
+                    f"Using first ACTIVE branch {relevant_branch.name} (ID: {relevant_branch.id}) for estimation (this branch might be closed)."
+                )
+            elif not active_branches.exists():  # Agar umuman aktiv filial bo'lmasa
+                logger.warning(
+                    f"No active branches available AT ALL to handle delivery order {order.id} for time estimation.")
+            # -----------------------------------------
+
+        # Buyurtma obyektida bu maydonlar borligiga ishonch hosil qilamiz (null=True bo'lsa ham)
+        order.estimated_ready_at = None
+        order.estimated_delivery_at = None
+        fields_to_update_for_estimates = []
 
         if relevant_branch:
+            # ... (taxminiy vaqtlarni hisoblash va saqlash logikasi #237-javobdagidek qoladi) ...
+            # Bu qism o'zgarishsiz:
             try:
                 now = timezone.now()
-                prep_time = timedelta(minutes=relevant_branch.avg_preparation_minutes)
+                prep_minutes = relevant_branch.avg_preparation_minutes
+                if prep_minutes is None: prep_minutes = 30
+                prep_time = timedelta(minutes=prep_minutes)
                 order.estimated_ready_at = now + prep_time
+                fields_to_update_for_estimates.append('estimated_ready_at')
 
                 if delivery_type == 'delivery':
-                    delivery_time = timedelta(minutes=relevant_branch.avg_delivery_extra_minutes)
+                    delivery_extra_minutes = relevant_branch.avg_delivery_extra_minutes
+                    if delivery_extra_minutes is None: delivery_extra_minutes = 20
+                    delivery_time = timedelta(minutes=delivery_extra_minutes)
                     order.estimated_delivery_at = order.estimated_ready_at + delivery_time
+                    fields_to_update_for_estimates.append('estimated_delivery_at')
 
-                order.save(update_fields=['estimated_ready_at', 'estimated_delivery_at'])
+                if fields_to_update_for_estimates:
+                    order.save(update_fields=fields_to_update_for_estimates)
+                    logger.info(
+                        f"Estimated times saved for order {order.id}: Ready at {order.estimated_ready_at}, Delivery at {order.estimated_delivery_at}")
             except Exception as e:
-                # Taxminiy vaqtni hisoblashda xato bo'lsa ham, buyurtma yaratildi deb hisoblaymiz
-                # Lekin logga yozib qo'yish kerak
-                print(f"Error calculating estimated time for order {order.id}: {e}")
+                logger.error(f"Error calculating or saving estimated time for order {order.id}: {e}", exc_info=True)
+        else:
+            logger.warning(f"No relevant branch determined for order {order.id}, cannot calculate estimated times.")
 
         # --- Savatni tozalaymiz ---
         cart_items.delete()
@@ -599,3 +582,20 @@ class BranchViewSet(viewsets.ReadOnlyModelViewSet):  # <-- ListAPIView o'rniga
     serializer_class = BranchSerializer
     permission_classes = [permissions.AllowAny]
     # lookup_field = 'pk' # Bu standart, shart emas
+
+
+class UserAddressViewSet(viewsets.ModelViewSet):
+    """
+    Foydalanuvchining saqlangan manzillarini boshqarish uchun endpoint.
+    Foydalanuvchi faqat o'zining manzillarini ko'ra oladi va boshqara oladi.
+    """
+    serializer_class = UserAddressSerializer
+    permission_classes = [permissions.IsAuthenticated]  # Faqat login qilganlar uchun
+
+    def get_queryset(self):
+        """Faqat joriy foydalanuvchiga tegishli manzillarni qaytaradi."""
+        return UserAddress.objects.filter(user=self.request.user).order_by('-created_at')
+
+    def perform_create(self, serializer):
+        """Manzil yaratilayotganda uni joriy foydalanuvchiga bog'laydi."""
+        serializer.save(user=self.request.user)

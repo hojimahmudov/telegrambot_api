@@ -12,10 +12,11 @@ from telegram.constants import ParseMode
 from api.models import Order
 # Loyihadagi boshqa modullardan importlar
 from ..config import ASKING_BRANCH, ASKING_LOCATION, MAIN_MENU, ASKING_DELIVERY_TYPE, ASKING_PAYMENT, \
-    ASKING_NOTES  # Kerakli holatlar
+    ASKING_NOTES, CONFIRMING_LOCATION, SELECTING_ADDRESS_OR_NEW, ASKING_SAVE_NEW_ADDRESS, \
+    ENTERING_ADDRESS_NAME  # Kerakli holatlar
 from ..keyboards import get_main_menu_markup
 from ..utils.helpers import get_user_lang
-from ..utils.api_client import make_api_request
+from ..utils.api_client import make_api_request, reverse_geocode
 
 # Klaviaturani import qilish kerak bo'lishi mumkin (masalan, cancel tugmasi uchun)
 # from ..keyboards import ...
@@ -85,12 +86,102 @@ async def show_branch_selection(update: Update, context: ContextTypes.DEFAULT_TY
                                        parse_mode=ParseMode.HTML)
 
 
+async def prompt_for_payment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """To'lov turini so'rash xabarini va tugmalarini yuboradi."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+    query = update.callback_query  # Ko'pincha callbackdan keladi
+
+    payment_prompt = "To'lov turini tanlang:" if lang_code == 'uz' else "Выберите способ оплаты:"
+    cash_text = "💵 Naqd" if lang_code == 'uz' else "💵 Наличные"
+    card_text = "💳 Karta" if lang_code == 'uz' else "💳 Картой"
+    cancel_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отмена"
+    keyboard = [
+        [InlineKeyboardButton(cash_text, callback_data="checkout_payment_cash"),
+         InlineKeyboardButton(card_text, callback_data="checkout_payment_card")],
+        [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:  # Agar avvalgi xabarni tahrirlash mumkin bo'lsa
+        try:
+            await query.edit_message_text(text=payment_prompt, reply_markup=reply_markup)
+        except Exception as e:
+            logger.warning(f"Could not edit message to prompt for payment: {e}")
+            await context.bot.send_message(chat_id=chat_id, text=payment_prompt, reply_markup=reply_markup)
+    elif update.message:  # Agar message handlerdan kelgan bo'lsa (masalan, handle_location)
+        await update.message.reply_text(text=payment_prompt, reply_markup=reply_markup)
+    else:  # Boshqa holatlar uchun (ehtimol query.message yo'q)
+        await context.bot.send_message(chat_id=chat_id, text=payment_prompt, reply_markup=reply_markup)
+
+    return ASKING_PAYMENT
+
+
+async def prompt_for_address_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Saqlangan manzillarni chiqaradi yoki yangi lokatsiya yuborishni so'raydi."""
+    user_id = update.effective_user.id
+    chat_id = update.effective_chat.id
+    lang_code = get_user_lang(context)
+    query = update.callback_query
+
+    loading_text = "Saqlangan manzillar tekshirilmoqda..." if lang_code == 'uz' else "Проверка сохраненных адресов..."
+    if query:
+        await query.answer()  # Avval callbackga javob beramiz
+        try:
+            await query.edit_message_text(loading_text)
+        except:
+            await context.bot.send_message(chat_id=chat_id, text=loading_text)  # Fallback
+    else:  # Agar query bo'lmasa (masalan, handle_delivery_type_selection dan to'g'ridan-to'g'ri)
+        await context.bot.send_message(chat_id=chat_id, text=loading_text)
+
+    saved_addresses_response = await make_api_request(context, 'GET', 'users/addresses/', user_id)
+    keyboard = []
+    final_text = ""
+
+    if saved_addresses_response and not saved_addresses_response.get('error'):
+        addresses = saved_addresses_response.get('results', [])
+        context.user_data['checkout_saved_addresses'] = {addr['id']: addr for addr in addresses}  # Tez qidirish uchun
+
+        if addresses:
+            final_text = "Saqlangan manzillardan birini tanlang yoki yangi lokatsiya yuboring:" if lang_code == 'uz' else "Выберите один из сохраненных адресов или отправьте новую локацию:"
+            for addr in addresses:
+                addr_name = addr.get('name', '')
+                addr_text_short = addr.get('address_text', f"Lat: {addr['latitude']:.2f}")[:30]
+                display_name = f"{addr_name} ({addr_text_short}...)" if addr_name else addr_text_short
+                keyboard.append([InlineKeyboardButton(display_name, callback_data=f"use_saved_addr_{addr.get('id')}")])
+        # Agar saqlangan manzil bo'lmasa, final_text bo'sh qoladi, keyingi blok ishlaydi
+    else:
+        logger.warning(f"Could not fetch saved addresses for user {user_id}: {saved_addresses_response}")
+        # Xatolik bo'lsa ham, yangi lokatsiya yuborish imkoniyatini beramiz
+
+    new_loc_text = "📍 Yangi lokatsiya yuborish" if lang_code == 'uz' else "📍 Отправить новую локацию"
+    keyboard.append([InlineKeyboardButton(new_loc_text, callback_data="send_new_location")])
+    cancel_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отмена"
+    keyboard.append([InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")])
+
+    if not final_text:  # Agar saqlangan manzillar bo'lmasa yoki API xatoligi
+        final_text = "Iltimos, yetkazib berish manzilini tanlang yoki yangi lokatsiya yuboring:" if lang_code == 'uz' else "Пожалуйста, выберите адрес доставки или отправьте новую локацию:"
+
+    reply_markup = InlineKeyboardMarkup(keyboard)
+
+    # Xabarni tahrirlash yoki yangisini yuborish
+    # Bu funksiya callbackdan chaqirilgani uchun query.message mavjud bo'ladi
+    if query and query.message:
+        try:
+            await query.edit_message_text(text=final_text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        except Exception:
+            await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=reply_markup,
+                                           parse_mode=ParseMode.HTML)
+    else:  # Bu holat bo'lmasligi kerak, chunki prompt_for_address_selection callbackdan keyin chaqiriladi
+        await context.bot.send_message(chat_id=chat_id, text=final_text, reply_markup=reply_markup,
+                                       parse_mode=ParseMode.HTML)
+
+    return SELECTING_ADDRESS_OR_NEW
+
+
 # --- YETKAZIB BERISH TURI TANLOVINI ISHLAYDIGAN HANDLER ---
 async def handle_delivery_type_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Yetkazib berish yoki Olib ketish tanlovini boshqaradi."""
-    # --- BU FUNKSIYANING BOSHLANISHIGA LOG QO'SHISHNI UNUTMANG (DEBUG UCHUN) ---
-    logger.info("handle_delivery_type_selection triggered!")
-    # ----------------------------------------------------------------------
     query = update.callback_query
     await query.answer()
     user_id = query.from_user.id
@@ -100,28 +191,17 @@ async def handle_delivery_type_selection(update: Update, context: ContextTypes.D
     if selection == "checkout_set_delivery":
         logger.info(f"User {user_id} selected delivery.")
         context.user_data['checkout_delivery_type'] = 'delivery'
-        keyboard = [[KeyboardButton("📍 Lokatsiya yuborish", request_location=True)]]
-        reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
-        message_text = "Yetkazib berish manzilini lokatsiya tugmasi orqali yuboring:" if lang_code == 'uz' else "Отправьте адрес доставки с помощью кнопки геолокации:"
-        # Oldingi xabarni tahrirlaymiz
-        try:
-            await query.edit_message_text(text=message_text)
-        except Exception as e:
-            logger.warning(f"Could not edit msg for location request: {e}")
-            await context.bot.send_message(chat_id=user_id, text=message_text)
-        # Reply tugmasini alohida yuboramiz
-        await context.bot.send_message(chat_id=user_id, text="👇", reply_markup=reply_markup)
-        return ASKING_LOCATION
-
+        # --- MANZIL TANLASH/YANGI SO'RASHGA O'TAMIZ ---
+        return await prompt_for_address_selection(update, context)
+        # -------------------------------------------
     elif selection == "checkout_set_pickup":
         logger.info(f"User {user_id} selected pickup.")
         context.user_data['checkout_delivery_type'] = 'pickup'
-        await show_branch_selection(update, context)  # Filiallarni ko'rsatish
+        await show_branch_selection(update, context)
         return ASKING_BRANCH
-
     else:
         logger.warning(f"Unexpected callback data: {selection}")
-        return ASKING_DELIVERY_TYPE  # Joriy holatda qolamiz
+        return ASKING_DELIVERY_TYPE
 
 
 async def handle_branch_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
@@ -453,11 +533,9 @@ async def skip_notes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
-    """Foydalanuvchi lokatsiya yuborganda ishlaydi."""
-    message = update.message  # Lokatsiya xabar sifatida keladi
+    message = update.message
     location = message.location
-    user = update.effective_user
-    user_id = user.id
+    user_id = update.effective_user.id
     lang_code = get_user_lang(context)
 
     if location:
@@ -465,39 +543,189 @@ async def handle_location(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         lon = location.longitude
         logger.info(f"User {user_id} sent location: Lat {lat}, Lon {lon}")
 
-        # Lokatsiyani keyinchalik checkoutda ishlatish uchun kontekstga saqlaymiz
-        context.user_data['checkout_latitude'] = lat
-        context.user_data['checkout_longitude'] = lon
+        # --- REVERSE GEOCODING ---
+        address_text = await reverse_geocode(lat, lon)
+        # -------------------------
 
-        # To'lov turini so'raymiz
-        payment_prompt = "To'lov turini tanlang:" if lang_code == 'uz' else "Выберите способ оплаты:"
-        cash_text = "💵 Naqd" if lang_code == 'uz' else "💵 Наличные"
-        card_text = "💳 Karta" if lang_code == 'uz' else "💳 Картой"
-        cancel_text = "❌ Bekor qilish" if lang_code == 'uz' else "❌ Отмена"
+        if address_text:
+            # Saqlab qo'yish uchun vaqtinchalik ma'lumotlar
+            context.user_data['checkout_pending_latitude'] = lat
+            context.user_data['checkout_pending_longitude'] = lon
+            context.user_data['checkout_pending_address_text'] = address_text  # Matnli manzilni ham saqlaymiz
+
+            confirm_prompt = "📍 Siz yuborgan manzil:\n" if lang_code == 'uz' else "📍 Вы отправили адрес:\n"
+            confirm_prompt += f"<pre>{address_text}</pre>\n\n"
+            confirm_prompt += "Ushbu manzil to'g'rimi?" if lang_code == 'uz' else "Этот адрес правильный?"
+
+            yes_text = "✅ Ha" if lang_code == 'uz' else "✅ Да"
+            no_text = "❌ Yo'q, qayta yuborish" if lang_code == 'uz' else "❌ Нет, отправить заново"
+            cancel_text = "🚫 Bekor qilish" if lang_code == 'uz' else "🚫 Отмена"
+
+            keyboard = [
+                [
+                    InlineKeyboardButton(yes_text, callback_data="loc_confirm_yes"),
+                    InlineKeyboardButton(no_text, callback_data="loc_confirm_no")
+                ],
+                [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+
+            await message.reply_text(confirm_prompt, reply_markup=reply_markup,
+                                     parse_mode=ParseMode.HTML)  # ReplyKeyboardRemove
+            return CONFIRMING_LOCATION  # Tasdiqlashni kutish holati
+        else:
+            # Agar reverse geocoding ishlamasa
+            error_text = "Lokatsiyangizni aniqlay olmadim. Iltimos, boshqa joydan yoki aniqroq lokatsiya yuboring, yoki /cancel bosing." if lang_code == 'uz' else "Не удалось определить ваш адрес. Пожалуйста, отправьте более точную локацию или нажмите /cancel."
+            await message.reply_text(error_text)
+            return ASKING_LOCATION  # Shu holatda qolamiz
+    else:  # Bu holat bo'lmasligi kerak (filtr tufayli)
+        logger.warning(f"Location handler triggered for user {user_id} but no location found.")
+        return ASKING_LOCATION
+
+
+async def confirm_location_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+    selection = query.data
+
+    if selection == "loc_confirm_yes":
+        logger.info(f"User {user_id} confirmed new location.")
+        # Vaqtinchalik saqlangan lokatsiya va manzilni asosiy checkout ma'lumotlariga o'tkazamiz
+        # Bu ma'lumotlar 'checkout_pending_...' kalitlarida saqlangan edi
+        context.user_data['checkout_latitude'] = context.user_data.get('checkout_pending_latitude')
+        context.user_data['checkout_longitude'] = context.user_data.get('checkout_pending_longitude')
+        context.user_data['checkout_address'] = context.user_data.get('checkout_pending_address_text')
+
+        # Endi bu yangi manzilni saqlashni so'raymiz
+        save_prompt = "Bu yangi manzilni keyingi buyurtmalar uchun saqlab qolishni xohlaysizmi?" if lang_code == 'uz' else "Хотите сохранить этот новый адрес для будущих заказов?"
+        yes_save_text = "✅ Ha, saqlash" if lang_code == 'uz' else "✅ Да, сохранить"
+        no_save_text = "❌ Yo'q, shart emas" if lang_code == 'uz' else "❌ Нет, не нужно"
 
         keyboard = [
-            [
-                InlineKeyboardButton(cash_text, callback_data="checkout_payment_cash"),
-                InlineKeyboardButton(card_text, callback_data="checkout_payment_card")
-            ],
-            [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
-            # ConversationHandler'dagi fallback ushlaydi
+            [InlineKeyboardButton(yes_save_text, callback_data="save_new_addr_yes")],
+            [InlineKeyboardButton(no_save_text, callback_data="save_new_addr_no")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
+        await query.edit_message_text(text=save_prompt, reply_markup=reply_markup)
+        return ASKING_SAVE_NEW_ADDRESS  # Yangi holatga o'tamiz
 
-        # Yangi xabar yuboramiz (bu ReplyKeyboardni ham olib tashlaydi)
-        await message.reply_text(
-            text=payment_prompt,
-            reply_markup=reply_markup  # Inline tugmalar bilan
-        )
-
-        return ASKING_PAYMENT  # To'lov turini kutish holatiga o'tamiz
+    elif selection == "loc_confirm_no":
+        # ... (Qayta manzil so'rash logikasi avvalgidek - prompt_for_address_selection chaqiradi) ...
+        logger.info(f"User {user_id} rejected location, prompting for address selection or new.")
+        return await prompt_for_address_selection(update, context)  # Bu funksiya o'zining state'ini qaytaradi
     else:
-        # Agar lokatsiya kelmasa (filtr bo'lsa ham, ehtimoldan xoli emas)
-        logger.warning(f"Location handler triggered for user {user_id} but no location found in message.")
-        await message.reply_text(
-            "Lokatsiya qabul qilishda xatolik. Qaytadan yuboring yoki /cancel bosing." if lang_code == 'uz' else "Ошибка при получении локации. Отправьте снова или нажмите /cancel.")
-        return ASKING_LOCATION  # Shu holatda qolamiz
+        return CONFIRMING_LOCATION
+
+
+async def handle_save_new_address_decision_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+    selection = query.data  # "save_new_addr_yes" yoki "save_new_addr_no"
+
+    if selection == "save_new_addr_yes":
+        logger.info(f"User {user_id} chose to save the new address.")
+        # Manzil uchun nom so'raymiz
+        prompt_name_text = "Manzil uchun nom kiriting (masalan, 'Uy', 'Ish').\nBo'sh qoldirsangiz, manzilning bir qismi nom bo'ladi.\n/skip_address_name - nom bermaslik." \
+            if lang_code == 'uz' else \
+            "Введите название для адреса (например, 'Дом', 'Работа').\nЕсли оставить пустым, частью адреса будет название.\n/skip_address_name - не указывать название."
+
+        # Biz ForceReply ishlatishimiz mumkin yoki oddiy matn kutishimiz mumkin
+        # Hozircha oddiy matn kutamiz va /skip_address_name buyrug'ini qo'shamiz
+        # Yoki inline tugma bilan "Nom bermaslik"
+        skip_btn_text = "Nom bermasdan saqlash" if lang_code == 'uz' else "Сохранить без названия"
+        keyboard = [[InlineKeyboardButton(skip_btn_text, callback_data="save_addr_skip_name")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+
+        await query.edit_message_text(text=prompt_name_text, reply_markup=reply_markup)
+        return ENTERING_ADDRESS_NAME  # Manzil nomini kutish holati
+
+    elif selection == "save_new_addr_no":
+        logger.info(f"User {user_id} chose NOT to save the new address.")
+        # Vaqtinchalik pending ma'lumotlarni tozalaymiz (chunki ular endi 'checkout_latitude' ga o'tdi)
+        for key in ['checkout_pending_latitude', 'checkout_pending_longitude', 'checkout_pending_address_text']:
+            if key in context.user_data: del context.user_data[key]
+        # To'g'ridan-to'g'ri to'lov turini so'rashga o'tamiz
+        return await prompt_for_payment(update, context)  # Bu ASKING_PAYMENT qaytaradi
+    else:
+        return ASKING_SAVE_NEW_ADDRESS  # Kutilmagan holat
+
+
+async def handle_address_name_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Foydalanuvchi yangi manzil uchun nom yozganda ishlaydi."""
+    user = update.effective_user  # Bu MessageHandler bo'lgani uchun update.message bor
+    user_id = user.id
+    address_name_input = update.message.text
+    lang_code = get_user_lang(context)
+
+    logger.info(f"User {user_id} entered address name: {address_name_input[:30]}")
+    context.user_data['checkout_new_address_name'] = address_name_input
+
+    # Endi manzilni API ga saqlaymiz va keyin to'lovga o'tamiz
+    return await save_newly_confirmed_address(update, context)
+
+
+async def skip_address_name_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """ "Nom bermaslik" tugmasi bosilganda yoki /skip_address_name buyrug'i kelganda."""
+    query = update.callback_query
+    if query: await query.answer()
+
+    user_id = update.effective_user.id
+    logger.info(f"User {user_id} chose to skip address name.")
+    context.user_data['checkout_new_address_name'] = None  # Nom yo'q
+
+    # Endi manzilni API ga saqlaymiz va keyin to'lovga o'tamiz
+    return await save_newly_confirmed_address(update, context)
+
+
+async def save_newly_confirmed_address(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Tasdiqlangan yangi manzilni APIga yuboradi va keyin to'lovga o'tadi."""
+    user_id = update.effective_user.id
+    lang_code = get_user_lang(context)
+    query = update.callback_query  # skip_notes_callback dan kelishi mumkin
+
+    lat = context.user_data.get('checkout_latitude')  # Bular loc_confirm_yes da o'rnatilgan edi
+    lon = context.user_data.get('checkout_longitude')
+    addr_text = context.user_data.get('checkout_address')
+    addr_name = context.user_data.get('checkout_new_address_name')  # Yangi nom
+
+    if lat is None or lon is None:
+        logger.error(f"Cannot save address for user {user_id}, lat/lon missing from context.")
+        await context.bot.send_message(chat_id=user_id, text="Manzilni saqlashda xatolik (koordinatalar yo'q).")
+        return await prompt_for_payment(update, context)  # To'lovga o'tib ketamiz
+
+    address_payload = {
+        "latitude": lat,
+        "longitude": lon,
+        "address_text": addr_text,
+        "name": addr_name if addr_name else None  # Agar nom berilmagan bo'lsa None
+    }
+    logger.info(f"Saving new address to API for user {user_id}: {address_payload}")
+    api_response = await make_api_request(context, 'POST', 'users/addresses/', user_id, data=address_payload)
+
+    if api_response and not api_response.get('error') and api_response.get('status_code') == 201:
+        save_success_text = "✅ Yangi manzil saqlandi!" if lang_code == 'uz' else "✅ Новый адрес сохранен!"
+        if query:  # Agar tugma bosilgan bo'lsa (skip name)
+            await query.answer(save_success_text)
+        else:  # Agar nom yozilgan bo'lsa (handle_address_name_input)
+            await context.bot.send_message(chat_id=user_id, text=save_success_text)
+    else:
+        save_fail_text = "Manzilni saqlashda xatolik yuz berdi." if lang_code == 'uz' else "Произошла ошибка при сохранении адреса."
+        logger.warning(f"Failed to save new address for user {user_id}. API response: {api_response}")
+        if query:
+            await query.answer(save_fail_text, show_alert=True)
+        else:
+            await context.bot.send_message(chat_id=user_id, text=save_fail_text)
+
+    # Vaqtinchalik pending va nom ma'lumotlarini tozalaymiz
+    for key in ['checkout_pending_latitude', 'checkout_pending_longitude', 'checkout_pending_address_text',
+                'checkout_new_address_name']:
+        if key in context.user_data: del context.user_data[key]
+
+    return await prompt_for_payment(update, context)
 
 
 async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE, history_data: dict):
@@ -593,8 +821,6 @@ async def show_order_history(update: Update, context: ContextTypes.DEFAULT_TYPE,
         await context.bot.send_message(chat_id=chat_id, text="Buyurtmalar tarixini ko'rsatishda xatolik.")
 
 
-# Buyurtma detallarini ko'rsatish uchun ham funksiya yaratish mumkin
-# async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_data: dict): ...
 async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_data: dict):
     """API dan kelgan yagona buyurtma ma'lumotlarini formatlab chiqaradi."""
     query = update.callback_query  # Bu funksiya callbackdan chaqiriladi
@@ -699,3 +925,63 @@ async def show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, 
             pass
         await context.bot.send_message(chat_id=chat_id, text=message_text, reply_markup=reply_markup,
                                        parse_mode=ParseMode.HTML)
+
+
+async def handle_saved_address_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """Saqlangan manzil tugmasi ('use_saved_addr_{id}') bosilganda ishlaydi."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    try:
+        address_id = int(query.data.split('_')[-1])
+        saved_addresses_dict = context.user_data.get('checkout_saved_addresses', {})
+        selected_address = saved_addresses_dict.get(address_id)
+
+        if not selected_address:
+            logger.warning(f"Selected saved address ID {address_id} not found in context for user {user_id}.")
+            await query.edit_message_text("Xatolik: Saqlangan manzil topilmadi. Qaytadan urinib ko'ring.")
+            return SELECTING_ADDRESS_OR_NEW
+
+        # Tanlangan manzil ma'lumotlarini checkout uchun asosiy joyga ko'chiramiz
+        context.user_data['checkout_latitude'] = selected_address.get('latitude')
+        context.user_data['checkout_longitude'] = selected_address.get('longitude')
+        context.user_data['checkout_address'] = selected_address.get('address_text') or selected_address.get('name')
+        logger.info(f"User {user_id} selected saved address: {context.user_data['checkout_address']}")
+
+        # Vaqtinchalik saqlangan manzillar ro'yxatini tozalaymiz
+        if 'checkout_saved_addresses' in context.user_data: del context.user_data['checkout_saved_addresses']
+
+        return await prompt_for_payment(update, context)  # To'lov turini so'rashga o'tamiz
+
+    except (IndexError, ValueError, TypeError, KeyError) as e:
+        logger.error(f"Error processing saved address selection: {query.data}, Error: {e}", exc_info=True)
+        await query.edit_message_text("Xatolik: Manzilni tanlashda muammo.")
+        return SELECTING_ADDRESS_OR_NEW
+
+
+async def handle_send_new_location_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
+    """ "Yangi lokatsiya yuborish" tugmasi bosilganda."""
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    lang_code = get_user_lang(context)
+
+    logger.info(f"User {user_id} chose to send a new location.")
+    message_text = "Iltimos, yetkazib berish manzilini lokatsiya tugmasi orqali yuboring:" if lang_code == 'uz' else "Пожалуйста, отправьте адрес доставки с помощью кнопки геолокации:"
+
+    # Eskicha ReplyKeyboard bilan lokatsiya so'raymiz
+    loc_button_text = "📍 Lokatsiya yuborish" if lang_code == 'uz' else "📍 Отправить локацию"
+    keyboard = [[KeyboardButton(loc_button_text, request_location=True)]]
+    reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True, one_time_keyboard=True)
+
+    try:
+        await query.edit_message_text(text=message_text)  # Inline tugmalarni olib tashlaydi
+    except Exception as e:
+        logger.warning(f"Could not edit 'send new location' prompt: {e}")
+        await context.bot.send_message(chat_id=user_id, text=message_text)  # Yangisini yuboramiz
+
+    await context.bot.send_message(chat_id=user_id, text="👇", reply_markup=reply_markup)  # ReplyKeyboardni chiqarish
+
+    return ASKING_LOCATION  # Lokatsiya kutish holati

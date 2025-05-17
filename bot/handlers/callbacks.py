@@ -393,7 +393,6 @@ async def back_button_callback(update: Update, context: ContextTypes.DEFAULT_TYP
             await show_category_list(update, context)  # Kategoriyalarga qaytaramiz
 
 
-# Checkout boshlash callback'i (placeholder)
 async def start_checkout_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:  # Endi state qaytaradi
     """ "Rasmiylashtirish" tugmasi bosilganda ishlaydi va checkout suhbatini boshlaydi."""
     query = update.callback_query
