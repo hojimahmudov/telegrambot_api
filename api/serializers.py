@@ -7,7 +7,7 @@ from parler_rest.serializers import TranslatableModelSerializer
 from parler_rest.fields import TranslatedFieldsField  # Til tablari uchun (ixtiyoriy)
 from .models import (
     User, Category, Product, Cart, CartItem, Order, OrderItem,
-    Branch, WorkingHours, UserAddress
+    Branch, WorkingHours, UserAddress, Promotion
 )
 
 
@@ -329,10 +329,31 @@ class UserAddressSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserAddress
         fields = ['id', 'user', 'name', 'address_text', 'latitude', 'longitude', 'created_at']
-        read_only_fields = ['user', 'created_at'] # User avtomatik o'rnatiladi
+        read_only_fields = ['user', 'created_at']  # User avtomatik o'rnatiladi
 
     def validate(self, data):
         # Foydalanuvchi o'zining manzillarini boshqarishi kerak
         # Bu tekshiruv ViewSet da permission orqali qilinadi, bu yerda shart emas
         # lekin qo'shimcha validatsiya qo'shish mumkin
         return data
+
+
+class PromotionSerializer(TranslatableModelSerializer):  # <-- TranslatableModelSerializer dan meros
+    is_currently_active = serializers.BooleanField(read_only=True)  # source kerak emas, modelda property
+
+    # Agar barcha tarjimalarni alohida 'translations' obyektida chiqarmoqchi bo'lsak:
+    # translations = TranslatedFieldsField(shared_model=Promotion)
+
+    class Meta:
+        model = Promotion
+        fields = [
+            'id',
+            'title',  # Avtomatik joriy tildagi tarjimani oladi
+            'description',  # Avtomatik joriy tildagi tarjimani oladi
+            # 'translations', # Agar TranslatedFieldsField ishlatsak, buni qo'shamiz
+            'image',
+            'start_date',
+            'end_date',
+            'is_active',
+            'is_currently_active'
+        ]

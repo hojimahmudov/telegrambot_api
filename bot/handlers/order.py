@@ -23,6 +23,8 @@ from ..utils.api_client import make_api_request, reverse_geocode
 
 logger = logging.getLogger(__name__)
 
+LOCATION_COMPARISON_TOLERANCE = 0.00001
+
 
 # --- YORDAMCHI FUNKSIYA: Filial tanlashni ko'rsatish ---
 # (Bu funksiya logikasi menu_browse.py dagi show_branch_list ga o'xshash bo'lishi mumkin,
@@ -252,7 +254,7 @@ async def handle_branch_selection(update: Update, context: ContextTypes.DEFAULT_
         return ASKING_BRANCH  # Shu holatda qolamiz
 
 
-# --- YANGI: To'lov Turini Tanlashni Boshqaradigan Handler ---
+#  To'lov Turini Tanlashni Boshqaradigan Handler ---
 async def handle_payment_selection(update: Update, context: ContextTypes.DEFAULT_TYPE) -> str:
     """To'lov turi tugmasi ('checkout_payment_{type}') bosilganda ishlaydi."""
     query = update.callback_query
@@ -293,7 +295,7 @@ async def handle_payment_selection(update: Update, context: ContextTypes.DEFAULT
         return ASKING_PAYMENT  # Shu holatda qolamiz
 
 
-# --- YANGI: Yakuniy Checkout Uchun Yordamchi Funksiya ---
+#  Yakuniy Checkout Uchun Yordamchi Funksiya ---
 async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Ma'lumotlarni yig'adi, checkout API ni chaqiradi, natijani yuboradi, suhbatni tugatadi."""
     query = update.callback_query
@@ -327,19 +329,19 @@ async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not delivery_type or not payment_type:  # Eng oddiy validatsiya
         logger.error(f"Missing critical checkout data for user {user_id}")
         # ... (Xatolik xabarini yuborib, suhbatni tugatish) ...
-        return ConversationHandler.END
+        return MAIN_MENU
 
     checkout_data = {"delivery_type": delivery_type, "payment_type": payment_type, "notes": notes, }
     if delivery_type == 'delivery':
         latitude = context.user_data.get("checkout_latitude");
         longitude = context.user_data.get("checkout_longitude")
-        if latitude is None or longitude is None: return ConversationHandler.END  # Xatolik
+        if latitude is None or longitude is None: return MAIN_MENU  # Xatolik
         checkout_data['latitude'] = latitude;
         checkout_data['longitude'] = longitude
         if context.user_data.get("checkout_address"): checkout_data['address'] = context.user_data["checkout_address"]
     elif delivery_type == 'pickup':
         branch_id = context.user_data.get("checkout_pickup_branch_id")
-        if not branch_id: return ConversationHandler.END  # Xatolik
+        if not branch_id: return MAIN_MENU   # Xatolik
         checkout_data['pickup_branch_id'] = branch_id
     # ------------------------------------------------------------
 
@@ -498,10 +500,10 @@ async def finalize_checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             except KeyError:
                 pass
 
-    return ConversationHandler.END  # Suhbatni tugatib, asosiy menyu holatiga qaytamiz
+    return MAIN_MENU  # Suhbatni tugatib, asosiy menyu holatiga qaytamiz
 
 
-# --- YANGI: Izoh Kiritish Uchun Handler ---
+#  Izoh Kiritish Uchun Handler ---
 async def handle_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Foydalanuvchi izoh yozganda ishlaydi."""
     user = update.effective_user
@@ -517,7 +519,7 @@ async def handle_notes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return await finalize_checkout(update, context)
 
 
-# --- YANGI: Izohni O'tkazib Yuborish Uchun Callback Handler ---
+# --- Izohni O'tkazib Yuborish Uchun Callback Handler ---
 async def skip_notes_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """ "Keyingisi / Izohsiz" tugmasi bosilganda ishlaydi."""
     query = update.callback_query
@@ -588,34 +590,82 @@ async def confirm_location_callback(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     user_id = query.from_user.id
     lang_code = get_user_lang(context)
-    selection = query.data
+    selection = query.data  # "loc_confirm_yes" yoki "loc_confirm_no"
+
+    # Vaqtinchalik (pending) lokatsiya ma'lumotlarini user_data dan olamiz
+    pending_lat = context.user_data.get('checkout_pending_latitude')
+    pending_lon = context.user_data.get('checkout_pending_longitude')
+    pending_address_text = context.user_data.get('checkout_pending_address_text')
 
     if selection == "loc_confirm_yes":
-        logger.info(f"User {user_id} confirmed new location.")
-        # Vaqtinchalik saqlangan lokatsiya va manzilni asosiy checkout ma'lumotlariga o'tkazamiz
-        # Bu ma'lumotlar 'checkout_pending_...' kalitlarida saqlangan edi
-        context.user_data['checkout_latitude'] = context.user_data.get('checkout_pending_latitude')
-        context.user_data['checkout_longitude'] = context.user_data.get('checkout_pending_longitude')
-        context.user_data['checkout_address'] = context.user_data.get('checkout_pending_address_text')
+        logger.info(f"User {user_id} confirmed new location: Lat {pending_lat}, Lon {pending_lon}")
 
-        # Endi bu yangi manzilni saqlashni so'raymiz
-        save_prompt = "Bu yangi manzilni keyingi buyurtmalar uchun saqlab qolishni xohlaysizmi?" if lang_code == 'uz' else "Хотите сохранить этот новый адрес для будущих заказов?"
-        yes_save_text = "✅ Ha, saqlash" if lang_code == 'uz' else "✅ Да, сохранить"
-        no_save_text = "❌ Yo'q, shart emas" if lang_code == 'uz' else "❌ Нет, не нужно"
+        if pending_lat is None or pending_lon is None:  # Bu holat bo'lmasligi kerak
+            logger.error(f"Pending location data missing for user {user_id} in confirm_location_yes.")
+            await query.edit_message_text("Xatolik: Lokatsiya ma'lumotlari topilmadi. Qaytadan urinib ko'ring.")
+            return await prompt_for_address_selection(update, context)
 
-        keyboard = [
-            [InlineKeyboardButton(yes_save_text, callback_data="save_new_addr_yes")],
-            [InlineKeyboardButton(no_save_text, callback_data="save_new_addr_no")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        await query.edit_message_text(text=save_prompt, reply_markup=reply_markup)
-        return ASKING_SAVE_NEW_ADDRESS  # Yangi holatga o'tamiz
+        # Tasdiqlangan lokatsiyani asosiy checkout ma'lumotlariga o'tkazamiz
+        context.user_data['checkout_latitude'] = pending_lat
+        context.user_data['checkout_longitude'] = pending_lon
+        context.user_data['checkout_address'] = pending_address_text
+
+        # --- YANGI TEKSHIRUV: Bu lokatsiya avval saqlanganmi? ---
+        is_existing_saved_address = False
+        # Foydalanuvchining saqlangan manzillarini API dan olamiz
+        saved_addresses_response = await make_api_request(context, 'GET', 'users/addresses/', user_id)
+
+        if saved_addresses_response and not saved_addresses_response.get('error'):
+            saved_addresses = saved_addresses_response.get('results', [])
+            for addr in saved_addresses:
+                # Koordinatalarni kichik farq bilan solishtiramiz
+                if (addr.get('latitude') is not None and addr.get('longitude') is not None and
+                        abs(addr['latitude'] - pending_lat) < LOCATION_COMPARISON_TOLERANCE and
+                        abs(addr['longitude'] - pending_lon) < LOCATION_COMPARISON_TOLERANCE):
+                    is_existing_saved_address = True
+                    logger.info(
+                        f"Confirmed location for user {user_id} matches existing saved address ID {addr.get('id')}.")
+                    # Agar mos kelsa, saqlangan manzil nomini/matnini ham olib qo'yishimiz mumkin
+                    # context.user_data['checkout_address'] = addr.get('address_text') or addr.get('name')
+                    break  # Moslik topildi, tsiklni to'xtatamiz
+        else:
+            # Saqlangan manzillarni olib bo'lmasa ham, jarayonni davom ettiramiz (saqlashni so'raymiz)
+            logger.warning(
+                f"Could not fetch saved addresses for user {user_id} to check for duplicates. Will ask to save.")
+
+        # Vaqtinchalik pending ma'lumotlarni tozalaymiz (endi kerak emas)
+        for key in ['checkout_pending_latitude', 'checkout_pending_longitude', 'checkout_pending_address_text']:
+            if key in context.user_data: del context.user_data[key]
+
+        if is_existing_saved_address:
+            logger.info(
+                f"Location is an existing saved address. Skipping 'save new address' prompt for user {user_id}.")
+            # To'g'ridan-to'g'ri to'lov turini so'rashga o'tamiz
+            return await prompt_for_payment(update, context)  # Bu ASKING_PAYMENT qaytaradi
+        else:
+            logger.info(f"Location is new. Asking user if they want to save it (user {user_id}).")
+            # Bu yangi manzilni saqlashni so'raymiz (avvalgi logikadek)
+            save_prompt = "Bu yangi manzilni keyingi buyurtmalar uchun saqlab qolishni xohlaysizmi?" if lang_code == 'uz' else "Хотите сохранить этот новый адрес для будущих заказов?"
+            yes_save_text = "✅ Ha, saqlash" if lang_code == 'uz' else "✅ Да, сохранить"
+            no_save_text = "❌ Yo'q, shart emas" if lang_code == 'uz' else "❌ Нет, не нужно"
+            cancel_text = "🚫 Bekor qilish" if lang_code == 'uz' else "🚫 Отмена"
+            keyboard = [
+                [InlineKeyboardButton(yes_save_text, callback_data="save_new_addr_yes")],
+                [InlineKeyboardButton(no_save_text, callback_data="save_new_addr_no")],
+                [InlineKeyboardButton(cancel_text, callback_data="checkout_cancel")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await query.edit_message_text(text=save_prompt, reply_markup=reply_markup)
+            return ASKING_SAVE_NEW_ADDRESS  # Yangi holatga o'tamiz
+        # --- TEKSHIRUV TUGADI ---
 
     elif selection == "loc_confirm_no":
-        # ... (Qayta manzil so'rash logikasi avvalgidek - prompt_for_address_selection chaqiradi) ...
         logger.info(f"User {user_id} rejected location, prompting for address selection or new.")
-        return await prompt_for_address_selection(update, context)  # Bu funksiya o'zining state'ini qaytaradi
-    else:
+        # Vaqtinchalik pending ma'lumotlarni tozalaymiz
+        for key in ['checkout_pending_latitude', 'checkout_pending_longitude', 'checkout_pending_address_text']:
+            if key in context.user_data: del context.user_data[key]
+        return await prompt_for_address_selection(update, context)  # Qayta manzil tanlash/kiritishni so'raymiz
+    else:  # Kutilmagan callback data
         return CONFIRMING_LOCATION
 
 

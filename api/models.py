@@ -496,3 +496,35 @@ class OrderItem(models.Model):
         product_name = self.product.safe_translation_getter('name', any_language=True) if self.product else _(
             "O'chirilgan mahsulot")
         return f"{self.quantity} x {product_name} (Buyurtma #{self.order.pk})"
+
+
+class Promotion(TranslatableModel):  # <-- TranslatableModel dan meros olamiz
+    translations = TranslatedFields(
+        title=models.CharField(_("Sarlavha"), max_length=255),
+        description=models.TextField(_("Tavsifi"), blank=True, null=True)
+    )
+    image = models.ImageField(_("Rasm"), upload_to='promotions/', blank=True, null=True)
+    start_date = models.DateTimeField(_("Boshlanish sanasi"), default=timezone.now)
+    end_date = models.DateTimeField(_("Tugash sanasi"), null=True, blank=True)
+    is_active = models.BooleanField(_("Aktiv"), default=True, db_index=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        # Tarjima qilingan nomni olishga harakat qilamiz
+        # safe_translation_getter joriy tilni yoki biror mavjud tilni qaytaradi
+        return self.safe_translation_getter("title", any_language=True, default=f"Promotion {self.pk}")
+
+    class Meta:
+        verbose_name = _("Aksiya")
+        verbose_name_plural = _("Aksiyalar")
+        ordering = ['-start_date', '-created_at']
+
+    @property
+    def is_currently_active(self):
+        # Bu metod o'zgarishsiz qoladi
+        now = timezone.now()
+        if not self.is_active: return False
+        if self.start_date > now: return False
+        if self.end_date and self.end_date < now: return False
+        return True

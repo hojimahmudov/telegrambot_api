@@ -9,7 +9,7 @@ from datetime import time, timedelta  # <-- time va timedelta'ni ham import qila
 
 # Modellar importi
 from .models import (
-    User, Category, Product, Branch, WorkingHours, Order, OrderItem
+    User, Category, Product, Branch, WorkingHours, Order, OrderItem, Promotion
 )
 
 # Parler Admin importlari (agar kerak bo'lsa)
@@ -214,3 +214,28 @@ class OrderAdmin(admin.ModelAdmin):
             'fields': ('created_at', 'updated_at')
         }),
     )
+
+
+@admin.register(Promotion)
+class PromotionAdmin(TranslatableAdmin):  # <-- TranslatableAdmin dan meros olamiz
+    list_display = ('title', 'start_date', 'end_date', 'is_active', 'is_currently_active_display')
+    list_filter = ('is_active', 'start_date', 'end_date')
+    search_fields = ('translations__title', 'translations__description')  # Tarjimalar orqali qidirish
+
+    # TranslatableAdmin o'zi tarjima maydonlarini to'g'ri chiqaradi,
+    # shuning uchun 'fields' yoki 'fieldsets' ni maxsus ko'rsatish shart emas (agar standart ko'rinish qoniqtirsa)
+    # Agar fieldslarni tartiblamoqchi bo'lsangiz:
+    fieldsets = (
+        (None, {
+            'fields': ('title', 'description', 'image')  # title va description parler tomonidan tab qilinadi
+        }),
+        (_('Amal qilish muddati va statusi'), {
+            'fields': ('start_date', 'end_date', 'is_active')
+        }),
+    )
+
+    def is_currently_active_display(self, obj):
+        return obj.is_currently_active
+
+    is_currently_active_display.boolean = True
+    is_currently_active_display.short_description = _("Hozir Aktivmi?")

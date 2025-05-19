@@ -1,5 +1,8 @@
 # bot/keyboards.py
 from telegram import ReplyKeyboardMarkup, InlineKeyboardMarkup, InlineKeyboardButton, KeyboardButton
+import logging
+
+logger = logging.getLogger(__name__)
 
 # --- Asosiy Menyu Klaviaturalari ---
 main_menu_keyboard_uz = [
@@ -16,9 +19,20 @@ main_menu_markup_uz = ReplyKeyboardMarkup(main_menu_keyboard_uz, resize_keyboard
 main_menu_markup_ru = ReplyKeyboardMarkup(main_menu_keyboard_ru, resize_keyboard=True)
 
 
-def get_main_menu_markup(lang_code: str) -> ReplyKeyboardMarkup:
+def get_main_menu_markup(context) -> ReplyKeyboardMarkup:  # context qabul qiladi
     """Tilga mos asosiy menyu klaviaturasini qaytaradi."""
-    return main_menu_markup_ru if lang_code == 'ru' else main_menu_markup_uz
+    # get_user_lang ni import qilish kerak bo'ladi, agar contextda user_id bo'lsa
+    # Hozircha get_user_lang ni helpers.py dan chaqiramiz
+    from .utils.helpers import get_user_lang  # Siklik import bo'lmasligi uchun ehtiyot bo'ling
+
+    lang_code = get_user_lang(context)
+    logger.info(f"GET_MAIN_MENU_MARKUP: Detected language_code = '{lang_code}'")  # <-- LOG QO'SHING
+    if lang_code == 'ru':
+        logger.info("GET_MAIN_MENU_MARKUP: Returning Russian keyboard.")  # <-- LOG QO'SHING
+        return main_menu_markup_ru
+    else:
+        logger.info("GET_MAIN_MENU_MARKUP: Returning Uzbek keyboard.")  # <-- LOG QO'SHING
+        return main_menu_markup_uz
 
 
 # --- Til Tanlash Klaviaturasi ---

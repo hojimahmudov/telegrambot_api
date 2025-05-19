@@ -46,4 +46,5 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     # Asosiy menyuga qaytarish uchun MAIN_MENU ni qaytarish ham mumkin,
     # lekin END suhbatni to'liq tugatadi, keyingi /start yangi boshlaydi.
-    return ConversationHandler.END
+    from bot.config import MAIN_MENU
+    return MAIN_MENU

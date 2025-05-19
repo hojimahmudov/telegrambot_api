@@ -4,7 +4,8 @@ from rest_framework.routers import DefaultRouter
 # View'larni import qilamiz
 from .views import (
     CategoryViewSet, ProductViewSet, UserProfileView, CartView, CheckoutView,
-    BranchViewSet, OrderHistoryView, OrderDetailView, OrderCancelView, PhoneLoginOrRegisterView, UserAddressViewSet
+    BranchViewSet, OrderHistoryView, OrderDetailView, OrderCancelView, PhoneLoginOrRegisterView, UserAddressViewSet,
+    PromotionViewSet
 )
 # simplejwt view'larini import qilamiz (token refresh uchun)
 from rest_framework_simplejwt.views import TokenObtainPairView, TokenRefreshView
@@ -18,6 +19,7 @@ router.register(r'categories', CategoryViewSet, basename='category')
 router.register(r'products', ProductViewSet, basename='product')
 router.register(r'branches', BranchViewSet, basename='branch')
 router.register(r'users/addresses', UserAddressViewSet, basename='useraddress')
+router.register(r'promotions', PromotionViewSet, basename='promotion')
 
 # URL pattern'lari ro'yxati
 urlpatterns = [

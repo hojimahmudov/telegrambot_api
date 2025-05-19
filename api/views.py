@@ -20,14 +20,15 @@ from decimal import Decimal  # <-- Narxlar bilan ishlash uchun
 # Modellarni import qilamiz
 from .models import (
     User, Category, Product, Cart, CartItem,
-    Order, OrderItem, Branch, UserAddress
+    Order, OrderItem, Branch, UserAddress, Promotion
 )
 # Serializer'larni import qilamiz
 from .serializers import (
     UserSerializer, CategorySerializer, ProductSerializer,
     RegistrationSerializer, OTPVerificationSerializer,
     CartSerializer, CartItemSerializer,
-    OrderSerializer, OrderItemSerializer, CheckoutSerializer, BranchSerializer, UserAddressSerializer
+    OrderSerializer, OrderItemSerializer, CheckoutSerializer, BranchSerializer, UserAddressSerializer,
+    PromotionSerializer
 )
 
 
@@ -599,3 +600,24 @@ class UserAddressViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         """Manzil yaratilayotganda uni joriy foydalanuvchiga bog'laydi."""
         serializer.save(user=self.request.user)
+
+
+class PromotionViewSet(viewsets.ReadOnlyModelViewSet):
+    """
+    Faqat aktiv va joriy vaqtda amal qilayotgan aksiyalarni ko'rsatish uchun.
+    """
+    serializer_class = PromotionSerializer
+    permission_classes = [permissions.AllowAny]  # Hamma ko'ra olsin
+
+    def get_queryset(self):
+        now = timezone.now()
+        # is_active=True va sana bo'yicha filtrlaymiz
+        # Modelda is_currently_active propertysi bor, lekin uni ORMda to'g'ridan-to'g'ri filterlash qiyin.
+        # Shuning uchun sana shartlarini bu yerda yozamiz.
+        from api import models
+        return Promotion.objects.filter(
+            is_active=True,
+            start_date__lte=now
+        ).filter(
+            Q(end_date__gte=now) | Q(end_date__isnull=True)
+        ).order_by('-start_date')
