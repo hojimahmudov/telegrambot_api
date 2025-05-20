@@ -25,16 +25,34 @@ class UserSerializer(serializers.ModelSerializer):
 
 # --- Category Serializer ---
 class CategorySerializer(TranslatableModelSerializer):
-    """Kategoriya ma'lumotlarini (tarjimalari bilan) API uchun tayyorlaydi."""
+    """Kategoriya ma'lumotlarini (tarjimalari va Google Drive'dagi rasm URLi bilan) API uchun tayyorlaydi."""
 
-    # DRF ning browsable API'sida tillar uchun alohida tablar chiqarish uchun:
+    # 'image_url' maydoni endi modeldagi 'image_gdrive_url' atributidan olinadi.
+    # Bu maydon faqat o'qish uchun (read_only=True), chunki u signallar orqali avtomatik to'ldiriladi.
+    # Agar rasm bo'lmasa, null bo'lishi mumkin (allow_null=True).
+    image_url = serializers.URLField(source='image_gdrive_url', read_only=True, allow_null=True)
+
+    # Agar barcha tarjimalarni 'translations' kaliti ostida guruhlab chiqarmoqchi bo'lsangiz:
     # translations = TranslatedFieldsField(shared_model=Category)
+    # Va 'fields' ro'yxatidan 'name' va 'slug' ni olib tashlab, 'translations' ni qo'shasiz.
+    # Hozircha 'name' va 'slug' ni alohida qoldiramiz, TranslatableModelSerializer ularni
+    # so'rovdagi Accept-Language sarlavhasiga qarab avtomatik tarjima qilib beradi.
 
     class Meta:
         model = Category
-        # API'da ko'rinadigan maydonlar
-        fields = ['id', 'name', 'image_url', 'is_active', 'order']
-        # 'name' maydoni avtomatik tarzda so'rov tiliga mos tarjimani qaytaradi
+        # API'da ko'rinadigan maydonlar ro'yxati:
+        fields = [
+            'id',
+            'name',          # Parler avtomatik joriy tildagi tarjimani oladi
+            'slug',          # Parler avtomatik joriy tildagi tarjimani oladi
+            'image_url',     # Endi Google Drive'dan keladigan URL
+            'parent',        # Asosiy kategoriyaning ID sini ko'rsatadi.
+                             # Agar to'liq ma'lumotini chiqarmoqchi bo'lsak, ichki CategorySerializer ishlatish kerak bo'ladi.
+            'is_active',
+            'order'
+        ]
+        # 'name' va 'slug' maydonlari modelda translations ichida bo'lgani uchun,
+        # TranslatableModelSerializer ularni to'g'ri tarjima qilib beradi.
 
 
 # --- Product Serializer ---
@@ -338,22 +356,12 @@ class UserAddressSerializer(serializers.ModelSerializer):
         return data
 
 
-class PromotionSerializer(TranslatableModelSerializer):  # <-- TranslatableModelSerializer dan meros
-    is_currently_active = serializers.BooleanField(read_only=True)  # source kerak emas, modelda property
-
-    # Agar barcha tarjimalarni alohida 'translations' obyektida chiqarmoqchi bo'lsak:
-    # translations = TranslatedFieldsField(shared_model=Promotion)
+class PromotionSerializer(TranslatableModelSerializer):
+    is_currently_active = serializers.BooleanField(read_only=True)
+    image_url = serializers.URLField(source='image_gdrive_url', read_only=True, allow_null=True)
 
     class Meta:
         model = Promotion
-        fields = [
-            'id',
-            'title',  # Avtomatik joriy tildagi tarjimani oladi
-            'description',  # Avtomatik joriy tildagi tarjimani oladi
-            # 'translations', # Agar TranslatedFieldsField ishlatsak, buni qo'shamiz
-            'image',
-            'start_date',
-            'end_date',
-            'is_active',
-            'is_currently_active'
-        ]
+        fields = ['id', 'title', 'description',
+                  'image_url',
+                  'start_date', 'end_date', 'is_active', 'is_currently_active']

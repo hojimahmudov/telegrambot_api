@@ -8,12 +8,14 @@ logger = logging.getLogger(__name__)
 main_menu_keyboard_uz = [
     ["🍽️ Menyu", "🛒 Savat"],
     ["📋 Buyurtmalarim", "📍 Filiallar"],
-    ["👤 Profil", "⚙️ Sozlamalar"]
+    ["🎁 Aksiyalar", "👤 Profil"],
+    ["⚙️ Sozlamalar"]
 ]
 main_menu_keyboard_ru = [
     ["🍽️ Меню", "🛒 Корзина"],
     ["📋 Мои заказы", "📍 Филиалы"],
-    ["👤 Профиль", "⚙️ Настройки"]
+    ["🎁 Акции", "👤 Профиль"],
+    ["⚙️ Настройки"]
 ]
 main_menu_markup_uz = ReplyKeyboardMarkup(main_menu_keyboard_uz, resize_keyboard=True)
 main_menu_markup_ru = ReplyKeyboardMarkup(main_menu_keyboard_ru, resize_keyboard=True)

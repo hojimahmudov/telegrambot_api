@@ -6,6 +6,7 @@ from telegram.ext import ContextTypes
 from .branch import show_branch_list_menu
 from .order import show_order_history
 from .profile import show_user_profile
+from .promotions import show_promotions_list
 from ..config import MAIN_MENU, SELECTING_LANG
 from ..keyboards import get_language_keyboard
 from ..utils.helpers import get_user_lang
@@ -77,6 +78,11 @@ async def main_menu_dispatch(update: Update, context: ContextTypes.DEFAULT_TYPE)
         reply_text = "Profil ma'lumotlari..." if lang_code == 'uz' else "Данные профиля..."
         await show_user_profile(update, context)  # <-- Yangi funksiyani chaqiramiz
         return next_state  # MAIN_MENU da qolamiz
+
+    elif message_text in ["🎁 Aksiyalar", "🎁 Акции"]:
+        await show_promotions_list(update, context)  # <-- Yangi funksiyani chaqiramiz
+        return next_state
+
     elif message_text in ["⚙️ Sozlamalar", "⚙️ Настройки"]:
         settings_text = "Tilni tanlang:" if lang_code == 'uz' else "Выберите язык:"
         reply_markup = get_language_keyboard()  # Til tanlash klaviaturasini olamiz

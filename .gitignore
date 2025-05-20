@@ -174,3 +174,4 @@ cython_debug/
 .pypirc
 .idea
 bot_storage.pickle
+bot_user_data.sqlite

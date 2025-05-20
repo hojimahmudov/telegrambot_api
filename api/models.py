@@ -1,4 +1,5 @@
 # api/models.py
+import os
 import datetime
 from django.db import models
 from django.conf import settings  # User modelini olish uchun qulay usul
@@ -8,6 +9,9 @@ from django.contrib.auth.models import AbstractUser
 from django.utils.translation import gettext_lazy as _
 from parler.models import TranslatableModel, TranslatedFields
 from django.utils import timezone
+from django.db.models.signals import post_delete  # Signal uchun
+from django.dispatch import receiver
+from .gdrive_utils import upload_to_drive, delete_from_drive
 
 from api.utils import send_direct_telegram_notification, logger
 
@@ -65,96 +69,133 @@ class User(AbstractUser):
 
 
 # --- Kategoriya Modeli ---
-class Category(TranslatableModel):  # <-- TranslatableModel'dan meros olamiz
-    """Mahsulot kategoriyalari uchun model (ko'p tilli)."""
-    translations = TranslatedFields(  # <-- Tarjima qilinadigan maydonlar shu yerda
-        name=models.CharField(
-            _("Nomi"),
-            max_length=100,
-            # Endi unique=True shu yerda emas, Meta'da bo'lishi mumkin yoki shart emas
+class Category(TranslatableModel):
+    translations = TranslatedFields(
+        name=models.CharField(_("Nomi"), max_length=200, db_index=True),
+        slug=models.SlugField(
+            _("Slug (link uchun)"),
+            max_length=200,
+            # unique=True, # Til bo'yicha unikallikni parler o'zi ta'minlaydi
+            help_text=_(
+                "Link uchun unikal nom (faqat lotin harflari, sonlar, chiziqcha va pastki chiziq). Odatda avtomatik to'ldiriladi.")
         )
     )
-    # Tarjima qilinmaydigan maydonlar shu yerda qoladi
-    image_url = models.URLField(
-        _("Rasm manzili"),
+    # Admin panelidan vaqtinchalik yuklash uchun
+    image = models.ImageField(
+        _("Rasm"),
+        upload_to='categories_local_temp/',  # Vaqtinchalik lokal papka
+        blank=True,
+        null=True,
+        help_text=_("Admin panelidan yuklanadigan vaqtinchalik rasm")
+    )
+    # Google Drive uchun maydonlar
+    google_drive_file_id = models.CharField(
+        _("Google Drive Fayl IDsi"),
         max_length=255,
+        blank=True,
+        null=True,
+        editable=False  # Admin panelida ko'rinmaydi/tahrirlanmaydi
+    )
+    image_gdrive_url = models.URLField(
+        _("Google Drive Rasm URL"),
+        max_length=1024,
+        blank=True,
+        null=True,
+        editable=False  # Admin panelida ko'rinmaydi/tahrirlanmaydi
+    )
+
+    parent = models.ForeignKey(
+        'self',
         null=True,
         blank=True,
-        help_text=_("Kategoriya rasmining URL manzili (ixtiyoriy)")
+        related_name='children',
+        on_delete=models.CASCADE,
+        verbose_name=_("Asosiy Kategoriya")
     )
-    is_active = models.BooleanField(
-        _("Aktiv"),
-        default=True,
-        help_text=_("Kategoriya mijozlar uchun ko'rinadimi?")
-    )
-    order = models.PositiveIntegerField(
-        _("Tartib raqami"),
-        default=0,
-        help_text=_("Kategoriyalarni saralash uchun raqam (kichigi birinchi)")
-    )
+    order = models.IntegerField(_("Tartib raqami"), default=0)
+    is_active = models.BooleanField(_("Aktiv"), default=True, db_index=True)
 
-    class Meta:
+    _original_image_name = None  # Rasm o'zgarganini bilish uchun
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Obyekt yuklanganda yoki yangi yaratilganda joriy rasm nomini saqlab qolamiz
+        self._original_image_name = self.image.name if self.image else None
+
+    def save(self, *args, **kwargs):
+        # Asosiy saqlash logikasi. GDrive bilan ishlash signallarda bo'ladi.
+        # Agar slug'ni avtomatik generatsiya qilmoqchi bo'lsak, bu yerda qilish mumkin,
+        # lekin parler bilan slug'lar har bir til uchun alohida bo'lgani uchun ehtiyot bo'lish kerak.
+        # Hozircha slug'ni admin panelidan kiritiladi deb hisoblaymiz.
+        super().save(*args, **kwargs)
+        # Rasm o'zgarganini keyingi save() chaqiruvigacha to'g'ri aniqlash uchun
+        self._original_image_name = self.image.name if self.image else None
+
+    class Meta(TranslatableModel.Meta):  # Parler uchun Meta dan meros olish kerak
         verbose_name = _("Kategoriya")
         verbose_name_plural = _("Kategoriyalar")
-        ordering = ['order']  # Nomi endi translations'da bo'lgani uchun order bo'yicha saralaymiz
+        ordering = ['order', 'pk']
 
     def __str__(self):
-        # safe_translation_getter - agar tarjima bo'lmasa xato bermaydi
-        return self.safe_translation_getter('name', any_language=True) or f"Category {self.pk}"
+        return self.safe_translation_getter("name", any_language=True, default=f"Category {self.pk}")
 
 
 # --- Mahsulot Modeli ---
 class Product(TranslatableModel):
     translations = TranslatedFields(
-        name=models.CharField(
-            _("Nomi"),
-            max_length=150
-        ),
-        description=models.TextField(
-            _("Tavsifi"),
-            null=True,
-            blank=True
-        )
+        name=models.CharField(_("Nomi"), max_length=200),
+        description=models.TextField(_("Tavsifi"), blank=True, null=True)
     )
-    category = models.ForeignKey(
-        Category,
-        on_delete=models.CASCADE,
-        related_name='products',
-        verbose_name=_("Kategoriya")
-    )
-    price = models.DecimalField(
-        _("Narxi"),
-        max_digits=10,
-        decimal_places=2
-    )
-    image_url = models.URLField(
-        _("Rasm manzili"),
-        max_length=255,
-        null=True,
-        blank=True,
-        help_text=_("Mahsulot rasmining URL manzili (ixtiyoriy)")
-    )
-    is_available = models.BooleanField(
-        _("Mavjud"),
-        default=True,
-        help_text=_("Mahsulot hozirda buyurtma uchun mavjudmi?")
-    )
-    created_at = models.DateTimeField(
-        _("Yaratilgan vaqti"),
-        auto_now_add=True
-    )
-    updated_at = models.DateTimeField(
-        _("Yangilangan vaqti"),
-        auto_now=True
-    )
+    category = models.ForeignKey('Category', related_name='products', on_delete=models.CASCADE,
+                                 verbose_name=_("Kategoriya"))
+    price = models.DecimalField(_("Narxi"), max_digits=10, decimal_places=2)
+    image = models.ImageField(_("Mahalliy Rasm"), upload_to='products_local_temp/', blank=True, null=True,
+                              help_text=_("Admin panelidan yuklanadigan vaqtinchalik rasm"))
 
-    class Meta:
-        verbose_name = _("Mahsulot")
-        verbose_name_plural = _("Mahsulotlar")
-        ordering = ['pk']  # Eng oddiy tartiblash
+    # Google Drive uchun maydonlar
+    google_drive_file_id = models.CharField(max_length=255, blank=True, null=True, editable=False)
+    image_gdrive_url = models.URLField(_("Google Drive Rasm URL"), max_length=1024, blank=True, null=True,
+                                       editable=False)
+
+    is_available = models.BooleanField(_("Mavjudligi"), default=True)
+    order = models.IntegerField(_("Tartib raqami"), default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    _original_image_name = None  # Rasm o'zgarganini bilish uchun
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_image_name = self.image.name if self.image else None
+
+    def save(self, *args, **kwargs):
+        # Asosiy saqlash (Django ImageField faylni lokal media papkaga saqlaydi)
+        # Agar bu yangi obyekt bo'lsa va PK kerak bo'lsa, avval boshqa maydonlarni saqlash kerak
+        is_new = self._state.adding
+
+        # Vaqtinchalik GDrive maydonlarini None qilamiz, agar rasm o'zgarayotgan bo'lsa
+        image_field_changed = False
+        current_image_name = self.image.name if self.image else None
+        if current_image_name != self._original_image_name:
+            image_field_changed = True
+            # Agar rasm o'zgargan bo'lsa yoki yangi rasm bo'lsa, eski GDrive faylini o'chirish kerak
+            # Lekin bu save() ichida emas, signalda qilgan yaxshiroq
+            # Hozircha eski ID ni None qilamiz, signal uni o'chiradi
+            # self.google_drive_file_id = None
+            # self.image_gdrive_url = None
+
+        super().save(*args, **kwargs)  # Bu yerda self.pk tayinlanadi (agar yangi bo'lsa)
+
+        # _original_image_name ni yangilaymiz
+        self._original_image_name = self.image.name if self.image else None
 
     def __str__(self):
-        return self.safe_translation_getter('name', any_language=True) or f"Product {self.pk}"
+        return self.safe_translation_getter("name", any_language=True, default=f"Product {self.pk}")
+
+    class Meta:
+        ordering = ['order', 'id']
+        verbose_name = _("Mahsulot")
+        verbose_name_plural = _("Mahsulotlar")
 
 
 class Cart(models.Model):
@@ -498,21 +539,52 @@ class OrderItem(models.Model):
         return f"{self.quantity} x {product_name} (Buyurtma #{self.order.pk})"
 
 
-class Promotion(TranslatableModel):  # <-- TranslatableModel dan meros olamiz
+class Promotion(TranslatableModel):
     translations = TranslatedFields(
         title=models.CharField(_("Sarlavha"), max_length=255),
         description=models.TextField(_("Tavsifi"), blank=True, null=True)
     )
-    image = models.ImageField(_("Rasm"), upload_to='promotions/', blank=True, null=True)
+    # Admin panelidan vaqtinchalik yuklash uchun
+    image = models.ImageField(
+        _("Rasm"),
+        upload_to='promotions_local_temp/',  # Vaqtinchalik lokal papka
+        blank=True,
+        null=True,
+        help_text=_("Admin panelidan yuklanadigan vaqtinchalik rasm")
+    )
+    # Google Drive uchun maydonlar
+    google_drive_file_id = models.CharField(
+        _("Google Drive Fayl IDsi"),
+        max_length=255,
+        blank=True,
+        null=True,
+        editable=False
+    )
+    image_gdrive_url = models.URLField(
+        _("Google Drive Rasm URL"),
+        max_length=1024,
+        blank=True,
+        null=True,
+        editable=False
+    )
+
     start_date = models.DateTimeField(_("Boshlanish sanasi"), default=timezone.now)
     end_date = models.DateTimeField(_("Tugash sanasi"), null=True, blank=True)
     is_active = models.BooleanField(_("Aktiv"), default=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
+    _original_image_name = None  # Rasm o'zgarganini bilish uchun
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._original_image_name = self.image.name if self.image else None
+
+    def save(self, *args, **kwargs):
+        super().save(*args, **kwargs)
+        self._original_image_name = self.image.name if self.image else None
+
     def __str__(self):
-        # Tarjima qilingan nomni olishga harakat qilamiz
-        # safe_translation_getter joriy tilni yoki biror mavjud tilni qaytaradi
         return self.safe_translation_getter("title", any_language=True, default=f"Promotion {self.pk}")
 
     class Meta:
@@ -522,7 +594,6 @@ class Promotion(TranslatableModel):  # <-- TranslatableModel dan meros olamiz
 
     @property
     def is_currently_active(self):
-        # Bu metod o'zgarishsiz qoladi
         now = timezone.now()
         if not self.is_active: return False
         if self.start_date > now: return False
