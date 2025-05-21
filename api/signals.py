@@ -1,166 +1,205 @@
+# api/signals.py
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 from django.conf import settings
 import os
 import logging
-from .models import Product, Category, Promotion  # Rasmli modellar
+
+from .models import Product, Category, Promotion
 from .gdrive_utils import upload_to_drive, delete_from_drive
 
-logger = logging.getLogger(__name__)  # Har bir faylda logger olishni unutmang
+logger = logging.getLogger(__name__)
 
 
-def handle_gdrive_upload(instance, image_field_name='image'):
-    logger.info(f"HANDLE_GDRIVE: Called for {instance._meta.model_name} {instance.pk}")
+def handle_gdrive_upload(instance, image_field_name='image'):  # image_field_name bu modeldagi ImageField nomi
+    model_name = instance._meta.model_name
+    instance_pk = getattr(instance, 'pk', 'UnknownPK')
+    log_prefix = f"GDrive Sync ({model_name} PK:{instance_pk}):"
+
     if not hasattr(instance, image_field_name):
-        logger.warning(f"HANDLE_GDRIVE: Instance has no field '{image_field_name}'. Skipping.")
+        logger.warning(f"{log_prefix} Instance has no field '{image_field_name}'. Skipping.")
         return
 
-    image_file = getattr(instance, image_field_name)
-    gdrive_id_field_name = 'google_drive_file_id'
-    gdrive_url_field_name = 'image_gdrive_url'
-    old_gdrive_id = getattr(instance, gdrive_id_field_name, None)
+    current_field_file_obj = getattr(instance, image_field_name, None)  # Bu Django FieldFile obyekti
+
+    # Google Drive bilan bog'liq maydon nomlari
+    gdrive_id_db_field = 'google_drive_file_id'  # Modelda shu nom bilan
+    gdrive_url_db_field = 'image_gdrive_url'  # Modelda shu nom bilan
+
+    # Saqlashdan oldingi GDrive ID sini olish
+    old_gdrive_id_from_db = None
+    if instance.pk and not instance._state.adding:
+        try:
+            db_instance = instance.__class__.objects.get(pk=instance.pk)
+            old_gdrive_id_from_db = getattr(db_instance, gdrive_id_db_field, None)
+        except instance.__class__.DoesNotExist:
+            logger.warning(f"{log_prefix} Could not fetch DB instance for PK {instance.pk} to get old GDrive ID.")
+
+    # Modelning __init__ da o'rnatilgan _original_image_name ga tayanamiz
+    original_image_name_at_init = getattr(instance, '_original_image_name', None)
+    current_image_name_in_field = current_field_file_obj.name if current_field_file_obj else None
+
+    image_content_has_genuinely_changed = current_image_name_in_field != original_image_name_at_init
 
     logger.info(
-        f"HANDLE_GDRIVE: Current image_file: {image_file.name if image_file else 'None'}. Old GDrive ID: {old_gdrive_id}")
+        f"{log_prefix} Called. Current image name: '{current_image_name_in_field}', "
+        f"Original image name (from init): '{original_image_name_at_init}', "
+        f"Image content changed flag: {image_content_has_genuinely_changed}"
+    )
 
-    if image_file and hasattr(image_file, 'path') and image_file.path:
-        logger.info(f"HANDLE_GDRIVE: New/changed image found: {image_file.path}")
+    if not image_content_has_genuinely_changed:
+        logger.info(
+            f"{log_prefix} Image field content not considered changed based on initial name. Skipping GDrive operations.")
+        return
+
+    # Agar rasm o'zgargan bo'lsa (yangi, boshqa yoki o'chirilgan)
+
+    new_gdrive_id_value = None
+    new_gdrive_url_value = None
+    path_of_locally_saved_file_for_upload = None  # Agar yangi fayl GDrive ga yuklansa, uning lokal yo'lini saqlaymiz
+
+    # 1. Agar eski GDrive fayl mavjud bo'lsa va rasm o'zgargan yoki o'chirilgan bo'lsa, uni Drive'dan o'chiramiz
+    if old_gdrive_id_from_db:
+        logger.info(f"{log_prefix} Attempting to delete old GDrive file: {old_gdrive_id_from_db}")
+        delete_from_drive(old_gdrive_id_from_db)
+        # DB maydonlarini ham None qilamiz, agar yangi rasm yuklanmasa shunday qoladi
+        new_gdrive_id_value = None
+        new_gdrive_url_value = None
+
+    # 2. Agar yangi rasm fayli mavjud bo'lsa (ya'ni, rasm maydoni bo'shatilmagan)
+    if current_field_file_obj and hasattr(current_field_file_obj, 'path') and \
+            current_field_file_obj.path and os.path.exists(current_field_file_obj.path):
+
+        local_path = current_field_file_obj.path
+        logger.info(f"{log_prefix} New/changed image found at '{local_path}'. Processing GDrive upload.")
+
         try:
-            if old_gdrive_id:
-                logger.info(f"HANDLE_GDRIVE: Attempting to delete old GDrive file {old_gdrive_id}")
-                delete_from_drive(old_gdrive_id)  # Bu gdrive_utils dan
+            base_name, ext = os.path.splitext(os.path.basename(local_path))
+            drive_file_name = f"{model_name}_{instance.pk if instance.pk else 'temp_new'}_{base_name}{ext}"
 
-            file_path = image_file.path
-            base_name, ext = os.path.splitext(os.path.basename(file_path))
-            drive_file_name = f"{instance._meta.model_name}_{instance.pk}_{base_name}{ext}"
-            drive_folder_id = None  # Hozircha rootga
+            temp_id, temp_url = upload_to_drive(local_path, drive_file_name)  # drive_folder_id None
 
-            logger.info(f"HANDLE_GDRIVE: Calling upload_to_drive with path: {file_path}, name: {drive_file_name}")
-            file_id, file_url = upload_to_drive(file_path, drive_file_name, drive_folder_id)  # Bu gdrive_utils dan
-
-            if file_id and file_url:
-                logger.info(f"HANDLE_GDRIVE: Upload successful. GDrive ID: {file_id}, URL: {file_url}")
-
-                # Rekursiyani oldini olish uchun signallarni vaqtincha o'chiramiz
-                sender_model = instance.__class__
-                post_save.disconnect(globals().get(f'process_gdrive_for_{sender_model._meta.model_name.lower()}'),
-                                     sender=sender_model)
-
-                setattr(instance, gdrive_id_field_name, file_id)
-                setattr(instance, gdrive_url_field_name, file_url)
-                instance.save(update_fields=[gdrive_id_field_name, gdrive_url_field_name])
-
-                post_save.connect(globals().get(f'process_gdrive_for_{sender_model._meta.model_name.lower()}'),
-                                  sender=sender_model)
-                logger.info(f"HANDLE_GDRIVE: {instance._meta.model_name} {instance.pk} GDrive fields updated in DB.")
+            if temp_id and temp_url:
+                new_gdrive_id_value = temp_id
+                new_gdrive_url_value = temp_url
+                path_of_locally_saved_file_for_upload = local_path  # Muvaffaqiyatli yuklashdan keyin o'chirish uchun
+                logger.info(f"{log_prefix} Image uploaded to GDrive. New ID: {new_gdrive_id_value}")
             else:
                 logger.error(
-                    f"HANDLE_GDRIVE: upload_to_drive returned None for {instance._meta.model_name} {instance.pk}")
-        except FileNotFoundError:
-            logger.warning(
-                f"HANDLE_GDRIVE: Local image file not found for {instance._meta.model_name} {instance.pk}. Path: {getattr(image_file, 'path', 'N/A')}")
+                    f"{log_prefix} GDrive upload failed for local file {local_path}. GDrive fields will remain/become None.")
+                # new_gdrive_id_value va new_gdrive_url_value None bo'lib qoladi
         except Exception as e:
-            logger.error(
-                f"HANDLE_GDRIVE: Error in GDrive upload logic for {instance._meta.model_name} {instance.pk}: {e}",
-                exc_info=True)
+            logger.error(f"{log_prefix} Error during GDrive upload process for {local_path}: {e}", exc_info=True)
+            new_gdrive_id_value = None
+            new_gdrive_url_value = None
 
-    elif not image_file and old_gdrive_id:  # Rasm olib tashlandi
-        logger.info(
-            f"HANDLE_GDRIVE: Image removed for {instance._meta.model_name} {instance.pk}. Deleting GDrive file {old_gdrive_id}")
+    # else: Rasm maydoni bo'shatilgan (current_field_file_obj yo'q)
+    # Bu holatda old_gdrive_id_from_db (agar bo'lsa) yuqorida o'chirilgan va
+    # new_gdrive_id_value/new_gdrive_url_value None bo'lib qoladi. Bu to'g'ri.
+
+    # Model obyektidagi GDrive maydonlarini va lokal rasm maydonini yangilash kerakmi?
+    fields_to_update_in_db = []
+
+    if getattr(instance, gdrive_id_db_field) != new_gdrive_id_value:
+        setattr(instance, gdrive_id_db_field, new_gdrive_id_value)
+        fields_to_update_in_db.append(gdrive_id_db_field)
+
+    if getattr(instance, gdrive_url_db_field) != new_gdrive_url_value:
+        setattr(instance, gdrive_url_db_field, new_gdrive_url_value)
+        fields_to_update_in_db.append(gdrive_url_db_field)
+
+    # Agar yangi rasm GDrive'ga muvaffaqiyatli yuklangan bo'lsa, LOKAL ImageFieldni tozalaymiz
+    if path_of_locally_saved_file_for_upload:  # Bu faqat GDrive'ga muvaffaqiyatli yuklanganda o'rnatiladi
+        if getattr(instance, image_field_name) is not None:
+            setattr(instance, image_field_name, None)  # Django ImageFieldni None qilamiz
+            fields_to_update_in_db.append(image_field_name)
+    # Agar rasm admin panelidan "Clear" qilingan bo'lsa, Django o'zi instance.image ni None qiladi.
+    # Biz faqat GDrive ID/URL ni None qilishimiz kerak (yuqorida qilingan).
+    # Lekin baribir image_field_name ni update_fields ga qo'shishimiz mumkin, to'g'ri saqlanishi uchun.
+    elif image_content_has_genuinely_changed and not current_field_file_obj:  # Rasm olib tashlangan
+        if image_field_name not in fields_to_update_in_db and getattr(instance, image_field_name) is not None:
+            # Bu holat Django admin "clear" checkbox'i bosilganda yuz beradi
+            # Django o'zi instance.image ni None qiladi, biz shunchaki update_fields ga qo'shamiz
+            fields_to_update_in_db.append(image_field_name)
+
+    if fields_to_update_in_db:
+        logger.info(f"{log_prefix} Saving updated GDrive/Image fields to DB: {fields_to_update_in_db}")
+
+        sender_model = instance.__class__
+        receiver_func_name = f'process_gdrive_for_{model_name.lower()}'
+        receiver_func = globals().get(receiver_func_name)
+
+        if receiver_func: post_save.disconnect(receiver_func, sender=sender_model)
         try:
-            delete_from_drive(old_gdrive_id)
-            sender_model = instance.__class__
-            post_save.disconnect(globals().get(f'process_gdrive_for_{sender_model._meta.model_name.lower()}'),
-                                 sender=sender_model)
-            setattr(instance, gdrive_id_field_name, None)
-            setattr(instance, gdrive_url_field_name, None)
-            instance.save(update_fields=[gdrive_id_field_name, gdrive_url_field_name])
-            post_save.connect(globals().get(f'process_gdrive_for_{sender_model._meta.model_name.lower()}'),
-                              sender=sender_model)
-            logger.info(f"HANDLE_GDRIVE: GDrive fields cleared in DB for {instance._meta.model_name} {instance.pk}.")
-        except Exception as e:
-            logger.error(
-                f"HANDLE_GDRIVE: Error deleting GDrive file for {instance._meta.model_name} {instance.pk} after image removal: {e}",
-                exc_info=True)
+            instance.save(update_fields=list(set(fields_to_update_in_db)))  # unique fields
+        except Exception as db_save_e:
+            logger.error(f"{log_prefix} Failed to save GDrive related fields to DB: {db_save_e}", exc_info=True)
+        if receiver_func: post_save.connect(receiver_func, sender=sender_model)
     else:
-        logger.info(
-            f"HANDLE_GDRIVE: No new image and no old GDrive ID, or image unchanged. Skipping GDrive operations for {instance._meta.model_name} {instance.pk}.")
+        logger.info(f"{log_prefix} No changes to GDrive/Image fields in DB needed for this signal instance.")
+
+    # DBga yozilgandan keyin lokal faylni o'chiramiz (agar yuklangan bo'lsa)
+    if path_of_locally_saved_file_for_upload and os.path.exists(path_of_locally_saved_file_for_upload):
+        try:
+            os.remove(path_of_locally_saved_file_for_upload)
+            logger.info(f"{log_prefix} Successfully deleted local temp file: {path_of_locally_saved_file_for_upload}")
+        except OSError as e_del_local:
+            logger.error(
+                f"{log_prefix} Failed to delete local temp file {path_of_locally_saved_file_for_upload}: {e_del_local}",
+                exc_info=True)
 
 
+# --- Product uchun signallar ---
 @receiver(post_save, sender=Product)
 def process_gdrive_for_product(sender, instance, created, **kwargs):
-    logger.critical(
-        f"DEBUG_SIGNAL: process_gdrive_for_product FIRED for Product PK: {instance.pk}, Created: {created}, UpdateFields: {kwargs.get('update_fields')}")
+    # Agar faqat GDrive maydonlari o'zgarayotgan bo'lsa (handle_gdrive_upload ichidan)
+    if kwargs.get('update_fields') and all(
+            f in ['google_drive_file_id', 'image_gdrive_url'] for f in kwargs['update_fields']):
+        return
+    if kwargs.get('raw', False): return  # Fixture yuklanayotganda ishlamasin
 
-    # Bu shartlarni vaqtincha olib turamiz yoki log qilamiz
-    raw_save = kwargs.get('raw', False)
-    update_fields = kwargs.get('update_fields')
-    logger.info(f"DEBUG_SIGNAL: Raw save: {raw_save}")
-    if update_fields:
-        logger.info(f"DEBUG_SIGNAL: Update fields: {update_fields}")
-
-    # if raw_save:
-    #     logger.info("DEBUG_SIGNAL: Skipping GDrive due to raw save.")
-    #     return
-
-    # if update_fields and all(field in ['google_drive_file_id', 'image_gdrive_url'] for field in update_fields) and len(update_fields) <= 2:
-    #     logger.info(f"DEBUG_SIGNAL: Skipping GDrive because only GDrive fields were updated.")
-    #     return
-
-    logger.info(f"DEBUG_SIGNAL: Proceeding to call handle_gdrive_upload for Product {instance.pk}")
-    handle_gdrive_upload(instance, image_field_name='image')
+    logger.info(f"Product post_save signal triggered for PK: {instance.pk}, Created: {created}")
+    handle_gdrive_upload(instance, 'image')
 
 
 @receiver(post_delete, sender=Product)
 def delete_product_image_from_drive(sender, instance, **kwargs):
+    logger.info(f"Product post_delete signal triggered for PK: {instance.pk}")
     if instance.google_drive_file_id:
-        logger.info(
-            f"Post_delete signal for Product {instance.pk}. Deleting GDrive file {instance.google_drive_file_id}")
         delete_from_drive(instance.google_drive_file_id)
 
 
-# Category va Promotion uchun ham xuddi shunday process_gdrive_for_... va delete_..._image_from_drive signallarini yarating.
+# --- Category uchun signallar ---
 @receiver(post_save, sender=Category)
 def process_gdrive_for_category(sender, instance, created, **kwargs):
-    update_fields = kwargs.get('update_fields')
+    if kwargs.get('update_fields') and all(
+            f in ['google_drive_file_id', 'image_gdrive_url'] for f in kwargs['update_fields']):
+        return
     if kwargs.get('raw', False): return
-    process_upload = False
-    if created and instance.image:
-        process_upload = True
-    elif not created and (update_fields is None or 'image' in update_fields):
-        process_upload = True
-
-    if process_upload:
-        logger.info(f"Post_save signal for Category {instance.pk}, image changed or new. Processing GDrive.")
-        handle_gdrive_upload(instance, image_field_name='image')
+    logger.info(f"Category post_save signal triggered for PK: {instance.pk}, Created: {created}")
+    handle_gdrive_upload(instance, 'image')
 
 
 @receiver(post_delete, sender=Category)
 def delete_category_image_from_drive(sender, instance, **kwargs):
+    logger.info(f"Category post_delete signal triggered for PK: {instance.pk}")
     if instance.google_drive_file_id:
-        logger.info(
-            f"Post_delete signal for Category {instance.pk}. Deleting GDrive file {instance.google_drive_file_id}")
         delete_from_drive(instance.google_drive_file_id)
 
 
+# --- Promotion uchun signallar ---
 @receiver(post_save, sender=Promotion)
 def process_gdrive_for_promotion(sender, instance, created, **kwargs):
-    update_fields = kwargs.get('update_fields')
+    if kwargs.get('update_fields') and all(
+            f in ['google_drive_file_id', 'image_gdrive_url'] for f in kwargs['update_fields']):
+        return
     if kwargs.get('raw', False): return
-    process_upload = False
-    if created and instance.image:
-        process_upload = True
-    elif not created and (update_fields is None or 'image' in update_fields):
-        process_upload = True
-
-    if process_upload:
-        logger.info(f"Post_save signal for Promotion {instance.pk}, image changed or new. Processing GDrive.")
-        handle_gdrive_upload(instance, image_field_name='image')
+    logger.info(f"Promotion post_save signal triggered for PK: {instance.pk}, Created: {created}")
+    handle_gdrive_upload(instance, 'image')
 
 
 @receiver(post_delete, sender=Promotion)
 def delete_promotion_image_from_drive(sender, instance, **kwargs):
+    logger.info(f"Promotion post_delete signal triggered for PK: {instance.pk}")
     if instance.google_drive_file_id:
-        logger.info(
-            f"Post_delete signal for Promotion {instance.pk}. Deleting GDrive file {instance.google_drive_file_id}")
         delete_from_drive(instance.google_drive_file_id)

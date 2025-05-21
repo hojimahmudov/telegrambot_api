@@ -41,19 +41,11 @@ class CategoryAdmin(TranslatableAdmin):
         (None, {
             'fields': ('name', 'slug', 'image', 'parent', 'order', 'is_active')
         }),
-        # Agar Google Drive maydonlarini admin panelida (faqat o'qish uchun) ko'rsatmoqchi bo'lsangiz:
-        # (_('Google Drive Ma\'lumotlari'), {
-        #     'fields': ('google_drive_file_id', 'image_gdrive_url'),
-        #     'classes': ('collapse',), # Boshida yopiq turadi
-        #     'description': _("Bu maydonlar avtomatik to'ldiriladi va tahrirlanmaydi.")
-        # }),
     )
 
-    # readonly_fields = ('google_drive_file_id', 'image_gdrive_url') # Agar fieldsetsda bo'lsa
+    # readonly_fields = ('google_drive_file_id', 'image_gdrive_url') # Agar kerak bo'lsa
 
     def get_prepopulated_fields(self, request, obj=None):
-        # Parler har bir til uchun alohida slug generatsiya qilishi mumkin
-        # Yoki faqat asosiy til uchun sozlash mumkin. Hozircha standart qoldiramiz.
         return {'slug': ('name',)}
 
     def _display_translated_name(self, obj):
@@ -61,12 +53,6 @@ class CategoryAdmin(TranslatableAdmin):
 
     _display_translated_name.short_description = _("Nomi (Tarjima)")
     _display_translated_name.admin_order_field = 'translations__name'
-
-    def get_queryset(self, request):
-        # TranslatableAdmin standart querysetini olamiz
-        qs = super().get_queryset(request)
-        # Dublikatlarni oldini olish uchun .distinct() qo'shamiz
-        return qs.distinct()  # <-- BU QATORNI QO'SHING
 
 
 # ProductAdmin'ni TranslatableAdmin'ga qaytaramiz va sozlamalarni tiklaymiz
