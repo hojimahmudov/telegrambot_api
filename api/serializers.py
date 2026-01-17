@@ -43,11 +43,11 @@ class CategorySerializer(TranslatableModelSerializer):
         # API'da ko'rinadigan maydonlar ro'yxati:
         fields = [
             'id',
-            'name',          # Parler avtomatik joriy tildagi tarjimani oladi
-            'slug',          # Parler avtomatik joriy tildagi tarjimani oladi
-            'image_url',     # Endi Google Drive'dan keladigan URL
-            'parent',        # Asosiy kategoriyaning ID sini ko'rsatadi.
-                             # Agar to'liq ma'lumotini chiqarmoqchi bo'lsak, ichki CategorySerializer ishlatish kerak bo'ladi.
+            'name',  # Parler avtomatik joriy tildagi tarjimani oladi
+            'slug',  # Parler avtomatik joriy tildagi tarjimani oladi
+            'image_url',  # Endi Google Drive'dan keladigan URL
+            'parent',  # Asosiy kategoriyaning ID sini ko'rsatadi.
+            # Agar to'liq ma'lumotini chiqarmoqchi bo'lsak, ichki CategorySerializer ishlatish kerak bo'ladi.
             'is_active',
             'order'
         ]
@@ -71,6 +71,7 @@ class ProductSerializer(TranslatableModelSerializer):
         source='category',  # Qaysi model maydoniga bog'lanishi
         write_only=True  # Faqat yozish uchun (GET so'rovida ko'rinmaydi)
     )
+    image_url = serializers.SerializerMethodField()
 
     # DRF ning browsable API'sida tillar uchun alohida tablar chiqarish uchun:
     # translations = TranslatedFieldsField(shared_model=Product)
@@ -89,6 +90,21 @@ class ProductSerializer(TranslatableModelSerializer):
             'is_available'  # Mahsulot mavjudligi
         ]
         # 'name' va 'description' maydonlari avtomatik tarzda so'rov tiliga mos tarjimani qaytaradi
+
+    def get_image_url(self, obj):
+        request = self.context.get('request')
+
+        # 1️⃣ Avval Google Drive URL bo‘lsa
+        if obj.image_gdrive_url:
+            return obj.image_gdrive_url
+
+        # 2️⃣ Aks holda lokal rasm
+        if obj.image and hasattr(obj.image, 'url'):
+            if request:
+                return request.build_absolute_uri(obj.image.url)
+            return obj.image.url
+
+        return None
 
 
 # --- Ro'yxatdan o'tish uchun Serializer ---
@@ -109,8 +125,20 @@ class RegistrationSerializer(serializers.Serializer):
 
     # Agar username ham unique bo'lishi kerak bo'lsa, validate qo'shish mumkin
     def validate_username(self, value):
-        if value and User.objects.filter(username=value).exists():
-            raise serializers.ValidationError("Bu username allaqachon mavjud.")
+        telegram_id = self.initial_data.get("telegram_id")
+
+        if not value:
+            return value
+
+        qs = User.objects.filter(username=value)
+
+        # Agar shu telegram_id bilan o‘sha user bo‘lsa — OK
+        if telegram_id:
+            qs = qs.exclude(telegram_id=telegram_id)
+
+        if qs.exists():
+            raise serializers.ValidationError("Bu username allaqachon boshqa foydalanuvchiga tegishli.")
+
         return value
 
 
